@@ -1,0 +1,25 @@
+# Secrets — never commit credentials
+.env
+.env.local
+.env.*.local
+# but DO commit the template
+!.env.example
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+
+# Test / rollout outputs (regenerated on every run; large + noisy)
+results/
+
+# Local debug dumps left in the repo root from manual probes
+zombie_*.txt
+
+# Pre-refactor backup file; superseded by craft/tools.py
+toolsbackup.py

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["craft*"]
+
+[project]
+name = "craft"
+version = "0.0.0"
+description = "Mysterious project without specification."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Michael Klear"}]
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0",
+]
