@@ -34,7 +34,6 @@ _CATEGORIES = {
     "mine_iron": "gather", "mine_diamond": "gather", "mine_copper": "gather",
     "craft": "craft", "smelt": "craft", "collect_smelt": "craft",
     "surface": "movement", "descend": "movement", "travel": "movement",
-    "goto_corpse": "movement",
     "build_shelter": "shelter", "place": "shelter",
 }
 _CAT_ORDER = ["gather", "craft", "movement", "shelter", "other"]

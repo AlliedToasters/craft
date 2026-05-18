@@ -25,7 +25,9 @@ The split is the point: LLM reasons over goals; Baritone/Wurst execute. When des
 - `craft/wurst.py` — `ensure_hacks_on(REQUIRED_HACKS)`. Fresh clients boot with all hacks off; preflight pre-enables. Required set includes KillAura/AutoEat/AutoTool/AutoRespawn/AntiKnockback/AutoSword/Fullbright/AutoReconnect. (AutoSwim was tried and removed 2026-05-16 — thrashed against Baritone, caused drownings.)
 - `craft/mine.py` — candidate-cycling miner (`mine_any_log/stone/iron/diamond`). `fair=True` switches to blind 1×2 tunneling (`tunnel_for`) for "no x-ray" mode.
 - `craft/llm.py` — Ollama / Anthropic chat (`chat()`, `chat_with_tools()`).
-- `craft/tools.py` — tool schemas + dispatch (mine_*, craft, smelt, place, surface, descend, travel, build_shelter, evasion, scan_nearest, collect_smelt).
+- `craft/subagent.py` — generic `synthesize(prompt, payload, model)` for single-shot non-tool LLM calls. Ollama + Anthropic paths; Qwen3 routes plain output through `message.reasoning` (chat-template quirk), so we read `reasoning` when `content` is empty. Pattern scaffold for orthogonal synthesis tasks; first user is scout.
+- `craft/scout.py` — `scan_chunk(dx, dz)` + `describe_chunk` + `describe_neighborhood(radius, fanout_model, unify_model)`. L3-compaction (heightmap + interesting-blocks) shrinks ~90KB raw block payload to ~5KB; below this threshold Qwen3-4B stops "going meta" and produces actual scout reports. TTL chunk-description cache. Env knobs: `CRAFT_SCOUT_FANOUT_MODEL`, `CRAFT_SCOUT_UNIFY_MODEL`, `CRAFT_SCOUT_CACHE_TTL_S`.
+- `craft/tools.py` — tool schemas + dispatch (mine_*, craft, smelt, place, surface, descend, travel, build_shelter, evasion, scan_nearest, collect_smelt, look_around). Env knob: `CRAFT_LOOK_AROUND_MAX_RADIUS` silently clamps requested radius.
 - `craft/agent.py` — closed-loop tool-calling agent. One tool call per turn, `max_turns` cap, per-turn stats injection (`pos=(x,y,z) facing=<cardinal>` ambient).
 - `craft/ambush.py` + `stress_test_shelter.py` — shelter stress harness (block-occupancy breach detector, ≥2 consecutive polls).
 
@@ -33,8 +35,11 @@ The split is the point: LLM reasons over goals; Baritone/Wurst execute. When des
 
 - **build_shelter** — surface-intended; warns on underground. Pre-flight: floor footprint + buildable block budget (53→63→73→...). At NIGHT, threshold drops 70→35 and refuses mine_* advice.
 - **evasion** — autonomous `Evasion.java` in homunculus + `/evasion/{arm,disarm,status}` + agent chokepoint. **Always-on, never per-handler arm/disarm** (maintenance trap). Validated: 17 zombies, fires in <1s, flee in ~3s, player ~0.05 blocks from anchor.
+- **water_aversion** — sibling reflex (`WaterAversion.java` + `/water_aversion/{arm,disarm,status}`). Fires on eye-submergence (`player.isUnderWater()`); cancels Baritone and paths to nearest dry standing spot via in-process BFS (radius 12 horiz, ±6 vert). Per-turn armed at the same chokepoint as evasion; arm body is empty (target computed at fire-time). Reflex is a substrate **pattern** — expect more (lava, suffocation, fall) sharing this shape.
 - **DoorCourtesy** — homunculus tick handler auto-closes doors/gates behind player. No API.
 - **scan_nearest** — pre-flight probe; drops absent species, sorts by distance. Saves ~6.75 min/call in absent-species biome. Probe-distance ≠ reachability (use as hint, not guarantee).
+- **look_around(radius)** — agent-callable scout. Wraps `scout.describe_neighborhood`: fans out a per-chunk subagent over (2r-1)² chunks then a synth-of-synths into a unified report with cardinal-direction hints. Daily-driver caps `radius` at 1 via `CRAFT_LOOK_AROUND_MAX_RADIUS=1` (silent clamp) — pure-qwen r=2 saturates the GPU and kills agents via planning latency. TTL chunk-description cache (30s) at r≥2 → 8-9× speedup on warm calls; ~7% hit rate at r=1.
+- **travel-scout interlock** — `handle_travel` pre-scans the corridor (player Y±1, ±3 perp, chunk-aligned per 4-block sample) for hazards (lava). On hit, clamps distance to stop ~2 blocks short and surfaces a `(clamped from N — lava at (x,y,z))` postscript. Honors no-dispatch-guards: action proceeds, no refusal.
 - **collect_smelt** — fire-and-forget furnace + later collect; smelt is async in MC reality. Empty-arg has a fallback to find active furnace.
 - **Shelter guards** — pre-shelter dusk guard (T-N before nightfall), shelter-stay guard (won't leave armed cavity), night-craft lockout (no `goto_home` walking agent out at night). Pre-dispatch death check at every tool boundary.
 - **Bed + sleep** — **GAP**. 3 wool + 3 planks skips night entirely. Agents won't idle 8 min inside shelter; next high-leverage substrate fix.
@@ -85,8 +90,6 @@ Ten PrismLauncher instances `1.21.4.agent0..9` at `$XDG_DATA_HOME/PrismLauncher/
 - **Non-peaceful (1)**: evasion (agent1).
 - **Mixed (1)**: shelter × 3 fan-out (agents 0/1/2).
 
-`goto_corpse` deferred — permadeath rollouts make corpse retrieval irrelevant.
-
 **Smoke 2026-05-16**: 13/13 PASS (peaceful + non_peaceful) in 365s. shelter runs separately.
 
 **Don't**: long-running stress in the default suite (keep total <5min @ iters=1); import test modules into `run_tests.py` (subprocess isolation matters for Baritone crashes); add tests to `mixed` casually.
@@ -97,6 +100,21 @@ Ten PrismLauncher instances `1.21.4.agent0..9` at `$XDG_DATA_HOME/PrismLauncher/
 - **Don't block on the user.** Smoke tests, healing, difficulty changes, /give all go through `POST $MC_SERVER_CMD_BASE/cmd {"cmd":"..."}` (any MC server command; player=`$MC_PLAYER_NAME`).
 - **Bug-fixing in Java side requires MC restart** (e.g., tag-aware `canonicalItem`).
 - **MC world seed is fixed across wipes** (`mc_wipe.sh` regenerates same world). Same (x,y,z) → same terrain. Load-bearing for reproducible stress-test replays.
+
+## Daily driver config (2026-05-17 baseline)
+
+Validated at N=25 = 92% survival; both deaths underground-mob, no substrate-caused deaths. Run via `./scripts/run_bigN_pureqwen.sh` (5 waves × 5 agents). Manual invocation env:
+
+```
+QWEN="hf.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF:F16"
+CRAFT_SCOUT_FANOUT_MODEL="$QWEN"           # scout fan-out subagent
+CRAFT_SCOUT_UNIFY_MODEL="$QWEN"            # scout synth-of-synths
+CRAFT_LOOK_AROUND_MAX_RADIUS=1             # critical: 1 chunk per call
+HOMUNCULUS_PORT=2557N  MC_PLAYER_NAME=agentN
+python -m craft.agent 30 minimal --model "$QWEN" --start-phase dawn --random-spawn-range 20000 ...
+```
+
+`CRAFT_LOOK_AROUND_MAX_RADIUS=1` is load-bearing for pure-qwen at fleet scale. Without it, 5 concurrent agents queue 9-25 scout fan-outs each → 40-80s look_around latency → agents drown / get mob-killed while idle in tool execution. With it, fan-out averages 1.65s. Same model, one substrate parameter, capability flips. Dominant remaining death mode: underground mobs (qwen barely uses build_shelter — 1× across N=25).
 
 ## Model-specific notes
 
@@ -112,6 +130,7 @@ Ten PrismLauncher instances `1.21.4.agent0..9` at `$XDG_DATA_HOME/PrismLauncher/
 - 2026-05-14: first iron-tier reach (Haiku R5), 9 rollouts + 12 substrate fixes that session.
 - 2026-05-15: r16 — gemma full T50 + diamond + 6 advancements, day 4 alive, zero deaths. r17 reproducibility fail (creeper T15) — r16 was an outlier; n=3+ before claiming baseline.
 - 2026-05-15: agent fleet + phase-grouped concurrent test runner shipped.
+- 2026-05-17: look_around scout subagent + travel-scout interlock + chunk-description TTL cache shipped. Pure-qwen daily-driver N=25 baseline = 92% survival, 0 substrate-caused deaths.
 
 ## Roadmap
 

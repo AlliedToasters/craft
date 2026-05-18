@@ -15,6 +15,11 @@
 # Auto-detects display when invoked from SSH (no DISPLAY set):
 # routes to local :0 GDM session on this box, NOT the SSH client.
 set -e
+# Mirror craft/__init__.py: shell + Python share .env config.
+ENV_FILE="$(dirname "$0")/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a; . "$ENV_FILE"; set +a
+fi
 N="${1:?usage: $0 <agent-number 0..9>}"
 case "$N" in 0|1|2|3|4|5|6|7|8|9) ;; *)
   echo "agent number must be 0..9, got '$N'" >&2; exit 2;;

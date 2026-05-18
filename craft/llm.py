@@ -24,10 +24,9 @@ import os
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
+# .env loading lives in craft/__init__.py (eager on first `import craft.*`).
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_DEFAULT_MODEL = "gemma-4-vanilla-q4-32k:latest"

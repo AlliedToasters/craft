@@ -20,7 +20,12 @@ from craft.config import PLAYER_NAME as _PLAYER_NAME, SERVER_CMD_BASE as _SERVER
 from craft.llm import chat_with_tools, DEFAULT_MODEL
 from craft.mine import _yaw_to_direction
 from craft.spawn import random_spawn
-from craft.tools import TOOLS, dispatch, HOMUNCULUS_BASE, set_shelter_night_lockout
+from craft.tools import (
+    HOMUNCULUS_BASE,
+    TOOLS,
+    dispatch,
+    get_burrow_state,
+)
 from craft.world import (
     PHASE_TICKS as _START_PHASE_TICKS,  # back-compat alias for any external readers
     resolve_phase_ticks,
@@ -202,105 +207,6 @@ def _poll_shelter_watch() -> str | None:
     return None
 
 
-# Tools blocked while watcher is armed AND time is night. These are the
-# primitives that move the agent away from anchor (Baritone-routed mining
-# counts: it walks to candidates). build_shelter is intentionally allowed
-# — it's the breach-repair path. craft/smelt/collect_smelt/place are
-# productive idle-time uses.
-_NIGHT_REFUSED_PRIMITIVES = frozenset({
-    "travel", "descend", "surface", "goto_corpse",
-    "mine_wood", "mine_stone", "mine_coal", "mine_iron", "mine_diamond",
-})
-
-
-def _refresh_shelter_night_lockout() -> None:
-    """Tell tools.py whether the shelter-night lockout should be active.
-
-    Re-evaluated each turn via a /stats fetch + watcher state. Lockout
-    is ON only when watcher is armed AND day_ticks indicates night.
-    """
-    if _shelter_watch is None:
-        set_shelter_night_lockout(False)
-        return
-    s = _stats_raw() or {}
-    day_ticks = s.get("day_ticks")
-    if not isinstance(day_ticks, (int, float)):
-        set_shelter_night_lockout(False)
-        return
-    set_shelter_night_lockout(day_ticks >= 12000)
-
-
-def _pre_shelter_dusk_guard(name: str) -> str | None:
-    """Hard-refuse leave-primitives when dusk is imminent AND no shelter armed.
-
-    Mirrors _shelter_stay_guard but covers the pre-shelter case: prompt rule
-    "RANK 2 SHELTER — <2min until dusk OR NIGHT" was advisory only, and 3
-    consecutive day-0-dusk deaths (r17 creeper underground, manual-r T19
-    skeleton, r19 creeper surfacing) showed the LLM keeps mining/surfacing
-    through dusk despite the time hint. Substrate now enforces it.
-
-    Allowed during the window: build_shelter (the way out), plus
-    craft/smelt/collect_smelt/place (idle productivity).
-    """
-    if _shelter_watch is not None:
-        return None  # _shelter_stay_guard handles the armed case
-    if name not in _NIGHT_REFUSED_PRIMITIVES:
-        return None
-    s = _stats_raw() or {}
-    day_ticks = s.get("day_ticks")
-    if not isinstance(day_ticks, (int, float)):
-        return None
-    # 9600 = 2min before dusk (matches SURVIVE_SHELTER_PROMPT "<2min" rule).
-    # No upper bound below 24000: at-night-without-shelter must also refuse.
-    if day_ticks < 9600:
-        return None
-    if day_ticks < 12000:
-        mins_to_dusk = (12000 - day_ticks) / 1200
-        when = f"DUSK approaches ({mins_to_dusk:.1f}min)"
-    else:
-        mins_to_dawn = (24000 - day_ticks) / 1200
-        when = f"NIGHT ({mins_to_dawn:.1f}min until dawn)"
-    return (
-        f"REFUSED: {when} and no shelter armed. {name} would expose you to "
-        f"mob spawns. Call build_shelter() now — surface site preferred, but "
-        f"deep-underground also works (drop dirt floor + ceiling). If short "
-        f"on cobble, mine_stone(8) is allowed only when day_ticks<9600. "
-        f"Productive alternatives this turn: craft sticks/torches/planks, "
-        f"smelt() raw materials, or collect_smelt() from active furnaces."
-    )
-
-
-def _shelter_stay_guard(name: str) -> str | None:
-    """Hard-refuse leave-shelter primitives when the watcher is armed at night.
-
-    Returns a refusal outcome string the dispatcher should use in place of
-    actually running the tool, or None to allow the call. Both Haiku and
-    gemma abandoned shelter at night in 2026-05-14 rollouts despite the
-    SURVIVE_SHELTER_PROMPT "stay near anchor" rule; the substrate enforces
-    what the prompt asked for.
-    """
-    if _shelter_watch is None:
-        return None
-    if name not in _NIGHT_REFUSED_PRIMITIVES:
-        return None
-    s = _stats_raw() or {}
-    day_ticks = s.get("day_ticks")
-    if not isinstance(day_ticks, (int, float)):
-        return None
-    if day_ticks < 12000:  # 12000=dusk, 24000=dawn
-        return None
-    ax, ay, az = _shelter_watch["anchor"]
-    mins_to_dawn = (24000 - day_ticks) / 1200
-    return (
-        f"REFUSED: shelter armed at ({ax},{ay},{az}) and time=NIGHT "
-        f"({mins_to_dawn:.1f}min until dawn). Movement primitives ({name}) are "
-        f"blocked — agents that left shelter at night in prior rollouts died. "
-        f"Use idle time productively: craft sticks/torches/planks, smelt() raw "
-        f"materials, or collect_smelt() from active furnaces. The next turn's "
-        f"stats will tick time forward; resume travel/mining when time=DAY."
-    )
-
-
 SYSTEM_PROMPT = (
     "OUTPUT FORMAT: Respond with a single tool call. Leave the content field empty. "
     "Do NOT emit <|channel|>, <|tool_response|>, <|message|>, or any other '<|...|>' tokens — "
@@ -318,12 +224,11 @@ SYSTEM_PROMPT = (
     "- surface() — go up to sky\n"
     "- descend(target_y) — dig down to Y\n"
     "- travel(direction, distance) — walk N blocks N/S/E/W (cap 64)\n"
-    "- goto_corpse() — route to your last death point to retrieve dropped items\n"
     "\nGoal completion: if your inventory already shows the goal item (a diamond), "
     "the run is OVER. Emit NO tool call. The harness ends the run when you stop "
     "emitting tool calls. Don't loop on surface() or other busywork.\n"
     "\nMovement notes:\n"
-    "- descend(), surface(), and goto_corpse() are CHUNKED: each call moves you part of the way and returns. For a deep target, just call the same tool again whenever the result says 'more — call ... again'. This is normal progress, not a failure.\n"
+    "- descend() and surface() are CHUNKED: each call moves you part of the way and returns. For a deep target, just call the same tool again whenever the result says 'more — call ... again'. This is normal progress, not a failure.\n"
     "- A 'PARTIAL' outcome means Baritone failed mid-chunk. Don't retry the same thing — switch strategy (mine_stone(8) to dig by hand, or travel to a different column).\n"
     "- Never call surface() repeatedly when already at surface (Δy < 2). Pick a new action.\n"
 )
@@ -347,7 +252,6 @@ SURVIVE_PROMPT = (
     "- surface() — go up to sky\n"
     "- descend(target_y) — dig down to Y\n"
     "- travel(direction, distance) — walk N blocks N/S/E/W (cap 64)\n"
-    "- goto_corpse() — route to your last death point to retrieve dropped items\n"
     "- build_shelter() — seal a 5×2×5 stone cavity around you with a north-facing door. "
     "Needs a wooden door in inventory (craft('oak_door', 1) — 6 planks → 3 doors) "
     "AND enough cobblestone/dirt/etc. to wall in (~90 blocks total). Surface-only — "
@@ -379,7 +283,7 @@ SURVIVE_PROMPT = (
     "- air ≤ 0 AND in_water=true → surface() immediately, you're drowning.\n"
     "- HP < 10 → travel to open flat terrain (not caves, not edges). HP regenerates when food ≥ 18.\n"
     "\nMovement notes:\n"
-    "- descend(), surface(), and goto_corpse() are CHUNKED: each call moves you part of the way and returns. Call again until the result no longer says 'more — call ... again'.\n"
+    "- descend() and surface() are CHUNKED: each call moves you part of the way and returns. Call again until the result no longer says 'more — call ... again'.\n"
     "- A 'PARTIAL' outcome means Baritone failed mid-chunk. Don't retry the same thing — switch strategy.\n"
     "- Never call surface() repeatedly when already at surface (Δy < 2). Pick a new action.\n"
 )
@@ -446,13 +350,20 @@ MINIMAL_PROMPT = (
     "- surface() — navigate up to sky\n"
     "- descend(target_y) — dig down to Y\n"
     "- travel(direction, distance) — walk up to 64 blocks N/S/E/W\n"
+    "- look_around(radius?) — read-only scout call; describes nearby terrain, "
+    "hazards, and resources with cardinal hints. radius=1 ~3s (1 chunk), "
+    "radius=2 ~5s (3×3, default), radius=3 ~8s (5×5).\n"
     "- build_shelter() — carve a 5×2×5 room, wall it in, install a door. "
     "Requires: wooden door in inventory + ~90 solid blocks (cobblestone/dirt/etc). Surface only.\n"
-    "- goto_corpse() — route to last death point to retrieve drops\n\n"
+    "- wall_in() — tunnel 3 cells into the nearest cardinal wall and seal yourself in "
+    "(1-cell foyer + 2 blocks placed + 2-cell back cavity). Requires: flush against a "
+    "solid wall (cave wall, hillside). Tunnel produces enough stone for the seal.\n"
+    "- carve_alcove() — carve a 2×3 alcove off your back cavity for crafting_table / "
+    "furnace / bed. Requires: an active wall_in pocket.\n\n"
     "Substrate facts (automatic — do not try to override):\n"
     "- Nearby mobs are auto-attacked (KillAura). Creepers detonate before dying — keep your distance.\n"
     "- Food in inventory is auto-eaten when hungry (AutoEat).\n\n"
-    "Movement: descend(), surface(), and goto_corpse() move in chunks. "
+    "Movement: descend() and surface() move in chunks. "
     "If the result says 'call again', call it again. "
     "PARTIAL = Baritone failed mid-path — switch strategy, do not retry the same call.\n"
 )
@@ -487,18 +398,11 @@ def _fetch_new_deaths(since_ms: int) -> list[dict]:
 
 
 def _format_death(d: dict) -> str:
-    """Render a death record as a one-line preamble for the next tool result."""
+    """Render a death record as a one-line log entry for the trajectory."""
     dp = d.get("death_pos") or [None, None, None]
-    rp = d.get("respawn_pos") or [None, None, None]
     msg = d.get("message", "you died")
     cause = d.get("cause", "unknown")
-    return (
-        f"YOU DIED: {msg} (cause: {cause}). "
-        f"Died at ({dp[0]},{dp[1]},{dp[2]}); respawned at ({rp[0]},{rp[1]},{rp[2]}). "
-        f"INVENTORY IS EMPTY. All prior pickaxes, ores, and logs are GONE — "
-        f"don't try to craft or smelt yet. First mine_wood() to restart progression. "
-        f"OR call goto_corpse() to retrieve drops (despawn in ~5 min, but the area is dangerous)."
-    )
+    return f"YOU DIED: {msg} (cause: {cause}). Died at ({dp[0]},{dp[1]},{dp[2]})."
 
 
 def _fetch_stats() -> str | None:
@@ -543,6 +447,17 @@ def _fetch_stats() -> str | None:
                 parts.append(f"facing={_yaw_to_direction(float(yaw))}")
     except (requests.RequestException, ValueError):
         pass  # transport blip — keep the rest of the stats line
+    # wall_in anchor hint. After a successful wall_in() the agent is in a
+    # 1×3 tube with a seal at cell 2 — easy to forget without F3-equivalent.
+    # Same shape as the shelter anchor hint logged by build_shelter.
+    bstate = get_burrow_state()
+    if bstate is not None:
+        ax, ay, az = bstate["anchor"]
+        sx, sy, sz = bstate["seal"]
+        parts.append(
+            f"wall_in=({ax},{ay},{az}) seal=({sx},{sy},{sz}) "
+            f"dir={bstate.get('direction', '?')}"
+        )
     # Day-time hint. MC day cycle: 0=sunrise, 12000=dusk, 24000=next dawn.
     # 24000 ticks = 20 real-time minutes ⇒ 1200 ticks/min. The agent uses
     # this to prioritize (shelter before nightfall; safe to explore at dawn).
@@ -791,6 +706,79 @@ def _format_evaded_preamble(status: dict, tool_name: str) -> str:
     )
 
 
+def _water_aversion_arm() -> bool:
+    """POST /water_aversion/arm. Returns True on 200/success.
+
+    Same per-turn-rearm pattern as evasion. No anchor — the dry-land target
+    is computed at fire-time by the Java-side BFS, not supplied here.
+    """
+    try:
+        r = requests.post(f"{HOMUNCULUS_BASE}/water_aversion/arm", timeout=3.0)
+        return r.ok and r.json().get("success") is True
+    except (requests.RequestException, ValueError):
+        return False
+
+
+def _water_aversion_disarm() -> None:
+    """POST /water_aversion/disarm. Best-effort.
+
+    Like evasion: clears state but does NOT cancel an in-progress flee. The
+    player keeps walking to dry land until the next Baritone task overrides.
+    """
+    try:
+        requests.post(f"{HOMUNCULUS_BASE}/water_aversion/disarm", timeout=3.0)
+    except requests.RequestException:
+        pass
+
+
+def _water_aversion_status() -> dict | None:
+    """GET /water_aversion/status. Shape: {success, armed, fired, submerged_pos,
+    dry_land_pos, flee_state, flee_failure_reason?}.
+    """
+    try:
+        r = requests.get(f"{HOMUNCULUS_BASE}/water_aversion/status", timeout=3.0)
+        r.raise_for_status()
+        return r.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _format_water_aversion_preamble(status: dict, tool_name: str) -> str:
+    """Render a WATER AVERSION FIRED preamble for the tool result.
+
+    Names the submerged location and the picked dry-land target, makes clear
+    the reflex flee is still running, and frames the next tool call as the
+    override point. Mirrors _format_evaded_preamble.
+    """
+    sp = status.get("submerged_pos")
+    if isinstance(sp, list) and len(sp) == 3:
+        sx, sy, sz = (int(v) if isinstance(v, (int, float)) else "?" for v in sp)
+        sub = f"({sx},{sy},{sz})"
+    else:
+        sub = "underwater"
+    dp = status.get("dry_land_pos")
+    if isinstance(dp, list) and len(dp) == 3:
+        dx, dy, dz = (int(v) if isinstance(v, (int, float)) else "?" for v in dp)
+        dst = f"({dx},{dy},{dz})"
+    else:
+        dst = "nearest dry land"
+    flee = status.get("flee_state", "in_progress")
+    if flee == "arrived":
+        progress = f"reflexive flee complete — player is back on dry land at {dst}"
+    elif flee in ("timeout", "failed"):
+        reason = status.get("flee_failure_reason", "unknown")
+        progress = (
+            f"reflexive flee {flee} (reason: {reason}); player may still be in water — "
+            f"verify pos and consider travel(<dir>, <short_dist>) toward visible shore"
+        )
+    else:
+        progress = f"reflexive flee IN PROGRESS toward {dst}; player still walking out"
+    return (
+        f"WATER AVERSION: was submerged at {sub} during {tool_name}; {progress}. "
+        f"Baritone breaks down in water; your next tool call will override the flee."
+    )
+
+
 def _server_cmd(cmd: str, *, timeout: float = 5.0) -> dict:
     """POST a single command to the MC server console. Returns raw JSON."""
     try:
@@ -862,7 +850,6 @@ def _apply_setup(
 def run(
     max_turns: int = 8,
     goal: str = "diamond",
-    permadeath: bool = True,
     *,
     start_phase: str = "none",
     random_spawn_range: int = 0,
@@ -893,9 +880,10 @@ def run(
         # compared against rollouts where the substrate was healthy.
         header: dict = {
             "_type": "header",
-            "goal": goal, "max_turns": max_turns, "permadeath": permadeath,
+            "goal": goal, "max_turns": max_turns,
             "start_phase": start_phase, "random_spawn_range": random_spawn_range,
             "model": model,
+            "player": _PLAYER_NAME,
             "started_at": time.time(),
         }
         if wurst_report is not None:
@@ -904,6 +892,18 @@ def run(
                 "wurst_loaded": wurst_report.get("wurst_loaded"),
                 "enabled": [r["name"] for r in wurst_report.get("results", []) if r.get("ok")],
                 "failed": [r["name"] for r in wurst_report.get("results", []) if not r.get("ok")],
+            }
+        # Spawn-time snapshot for rolling-rollout analysis. Captures the
+        # precise incidental MC time-of-day each rollout lands on (not just
+        # dawn/noon/dusk) so spawn-time distribution can be reconstructed
+        # from headers alone, without parsing per-turn stats.
+        spawn_stats = _stats_raw()
+        if spawn_stats:
+            header["spawn"] = {
+                k: spawn_stats.get(k) for k in (
+                    "day_ticks", "day_count", "biome",
+                    "x", "y", "z", "dimension",
+                ) if k in spawn_stats
             }
         jsonl_fh.write(json.dumps(header) + "\n")
 
@@ -933,8 +933,7 @@ def run(
     # rollouts don't blow up prefill cost: gemma median plan_s climbed from
     # ~10s on early turns to 60-80s on late turns in 2026-05-14 rollouts.
     WINDOW_TURNS = 8
-    pd_tag = " permadeath" if permadeath else ""
-    print(f"=== goal={goal}, max_turns={max_turns}{pd_tag} (window={WINDOW_TURNS}) ===")
+    print(f"=== goal={goal}, max_turns={max_turns} permadeath (window={WINDOW_TURNS}) ===")
 
     print("starting in 3s...")
     time.sleep(3)
@@ -1015,24 +1014,19 @@ def run(
         # Pre-dispatch death poll. Long plan times (gemma can be >100s) leave
         # the agent vulnerable mid-plan — observed r9 T17: 133.8s plan during
         # which a zombie killed the swamp agent; build_shelter then executed
-        # at the respawn coords with an empty inventory. In permadeath mode,
-        # stop the loop now instead of running a wasted dispatch.
-        if permadeath:
-            pre_deaths = _fetch_new_deaths(last_death_ts)
-            if pre_deaths:
-                d = pre_deaths[-1]
-                last_death_ts = int(d.get("timestamp", last_death_ts))
-                preamble = _format_death(d)
-                print(f"[death] {preamble} (during planning — skipping dispatch)")
-                turn_dt = time.perf_counter() - turn_start
-                print(f"[timing] turn {turn} aborted post-plan: total={turn_dt:.1f}s")
-                break
+        # at the respawn coords with an empty inventory. Stop the loop now
+        # instead of running a wasted dispatch.
+        pre_deaths = _fetch_new_deaths(last_death_ts)
+        if pre_deaths:
+            d = pre_deaths[-1]
+            last_death_ts = int(d.get("timestamp", last_death_ts))
+            preamble = _format_death(d)
+            print(f"[death] {preamble} (during planning — skipping dispatch)")
+            turn_dt = time.perf_counter() - turn_start
+            print(f"[timing] turn {turn} aborted post-plan: total={turn_dt:.1f}s")
+            break
 
         exec_start = time.perf_counter()
-        # Toggle the tools-side night lockout so handle_craft skips the
-        # goto_home fallback (home table is usually outside the shelter).
-        # Re-evaluated each turn — armed + day allows crafting at home freely.
-        _refresh_shelter_night_lockout()
         # Reflexive evasion: re-arm with the current player position. The
         # homunculus-side watcher autonomously cancels Baritone + flees back
         # here on any hostile-mob hit — handlers don't participate. We
@@ -1040,6 +1034,7 @@ def run(
         # stops being tracked (the flee itself can keep running in MC; it'll
         # be cancelled implicitly by whatever this turn's tool dispatches).
         _evasion_disarm()
+        _water_aversion_disarm()
         evasion_armed = False
         try:
             pos_resp = requests.get(f"{HOMUNCULUS_BASE}/position", timeout=3.0)
@@ -1053,12 +1048,10 @@ def run(
             evasion_armed = _evasion_arm(float(ax), float(ay), float(az))
             if evasion_armed:
                 print(f"[evasion] armed at ({int(ax)},{int(ay)},{int(az)})", flush=True)
-        guard = _shelter_stay_guard(name) or _pre_shelter_dusk_guard(name)
-        if guard is not None:
-            outcome = guard
-            print(f"[shelter_guard] refused {name}", flush=True)
-        else:
-            outcome = dispatch(name, args)
+        water_aversion_armed = _water_aversion_arm()
+        if water_aversion_armed:
+            print("[water_aversion] armed", flush=True)
+        outcome = dispatch(name, args)
         exec_dt = time.perf_counter() - exec_start
 
         # Post-dispatch evasion check. Don't block on flee completion — the
@@ -1072,6 +1065,13 @@ def run(
             if evasion_status and evasion_status.get("fired"):
                 evaded_preamble = _format_evaded_preamble(evasion_status, name)
                 print(f"[evasion] FIRED: {evaded_preamble}", flush=True)
+        water_aversion_status: dict | None = None
+        water_aversion_preamble: str | None = None
+        if water_aversion_armed:
+            water_aversion_status = _water_aversion_status()
+            if water_aversion_status and water_aversion_status.get("fired"):
+                water_aversion_preamble = _format_water_aversion_preamble(water_aversion_status, name)
+                print(f"[water_aversion] FIRED: {water_aversion_preamble}", flush=True)
         print(f"=== turn {turn} outcome: {outcome} ===")
         print(f"[timing] turn {turn}: plan={plan_dt:.1f}s exec={exec_dt:.1f}s ({name})")
 
@@ -1121,6 +1121,11 @@ def run(
         # Evasion preamble outranks shelter: a hostile-mob hit just landed,
         # the reflex flee is in flight, and the LLM's next call needs that
         # context to pick its pivot (build_shelter / travel / fight).
+        # Water aversion preamble sits between: less urgent than a hostile-mob
+        # hit, more load-bearing than a shelter watch hint. Insert in reverse
+        # priority so evasion ends up at chunks[0].
+        if water_aversion_preamble:
+            chunks.insert(0, water_aversion_preamble)
         if evaded_preamble:
             chunks.insert(0, evaded_preamble)
         full_outcome = "\n\n".join(chunks)
@@ -1191,17 +1196,26 @@ def run(
                     "anchor": evasion_status.get("anchor"),
                     "flee_state": evasion_status.get("flee_state"),
                 }
+            if water_aversion_status is not None:
+                rec["water_aversion"] = {
+                    "fired": bool(water_aversion_status.get("fired")),
+                    "submerged_pos": water_aversion_status.get("submerged_pos"),
+                    "dry_land_pos": water_aversion_status.get("dry_land_pos"),
+                    "flee_state": water_aversion_status.get("flee_state"),
+                }
             if died_this_turn and new_deaths:
                 rec["death"] = new_deaths[-1]
             jsonl_fh.write(json.dumps(rec) + "\n")
 
-        if died_this_turn and permadeath:
+        if died_this_turn:
             print(f"\n=== PERMADEATH: trajectory terminated at turn {turn} ===")
             break
 
-    # Disarm evasion at rollout end so a stale anchor doesn't trigger a
-    # cancel-and-flee on the next /baritone/* call by some other client.
+    # Disarm evasion + water_aversion at rollout end so a stale armed state
+    # doesn't trigger a cancel-and-flee on the next /baritone/* call by
+    # some other client.
     _evasion_disarm()
+    _water_aversion_disarm()
 
     rollout_wall_s = time.time() - rollout_start_t
     mean_plan = (plan_s_total / plan_s_count) if plan_s_count else 0.0
@@ -1228,15 +1242,11 @@ def run(
 if __name__ == "__main__":
     import argparse
 
-    ap = argparse.ArgumentParser(description="Run a craft.agent rollout.")
-    # Positional args preserve the legacy invocation: python -m craft.agent 50 survive_shelter permadeath
+    ap = argparse.ArgumentParser(description="Run a craft.agent rollout (permadeath; first death ends the trajectory).")
     ap.add_argument("turns", nargs="?", type=int, default=8,
                     help="max turns (default 8)")
     ap.add_argument("goal", nargs="?", default="diamond",
                     help=f"goal prompt: {sorted(GOAL_PROMPTS)} (default diamond)")
-    ap.add_argument("permadeath", nargs="?", default="",
-                    help="legacy positional: 'permadeath' or '1' to enable")
-    # Named flags for the controlled-experiment setup.
     ap.add_argument("--start-phase",
                     choices=["dawn", "noon", "dusk", "midnight", "random", "none"],
                     default="none",
@@ -1244,21 +1254,15 @@ if __name__ == "__main__":
     ap.add_argument("--random-spawn-range", type=int, default=20000,
                     help="TP player to a random xz offset (±N from current pos, drop y=100); "
                          "default 20000 for broad biome sampling, 0 to disable")
-    ap.add_argument("--permadeath", dest="permadeath_flag", action="store_true",
-                    help="end rollout on first death (preferred over positional form)")
     ap.add_argument("--jsonl-out", default=None,
                     help="write per-turn JSONL to PATH (default: results/rollout-<goal>-<ts>.jsonl; '' to disable)")
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"LLM backend; gemma-* → Ollama, claude-* → Anthropic. Default: {DEFAULT_MODEL}")
     args = ap.parse_args()
 
-    permadeath = args.permadeath_flag or (
-        args.permadeath.lower() in ("1", "true", "permadeath")
-    )
     run(
         max_turns=args.turns,
         goal=args.goal,
-        permadeath=permadeath,
         start_phase=args.start_phase,
         random_spawn_range=args.random_spawn_range,
         jsonl_path=args.jsonl_out,

@@ -8,11 +8,15 @@ as the `tool` role message for the next turn.
 from __future__ import annotations
 
 import json
+import math
+import os
 
 import requests
 
 from craft.mine import (
     LOG_TYPES,
+    _DIR_VEC,
+    _yaw_to_direction,
     mine_any_coal,
     mine_any_diamond,
     mine_any_iron,
@@ -31,7 +35,6 @@ MAX_QUANTITY = 10
 TRAVEL_MAX_DISTANCE = 64
 DESCEND_MAX_PER_CALL = 40
 SURFACE_MAX_PER_CALL = 40
-GOTO_CORPSE_MAX_PER_CALL = 40
 
 # Items whose inventory counts are summed to track mining progress.
 # mine_wood/mine_stone use delta semantics: target = current_count + requested.
@@ -477,28 +480,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "goto_corpse",
-            "description": (
-                "Travel to your most recent death location. After dying you "
-                "respawn with an empty inventory; your dropped items sit at the "
-                "death point for ~5 minutes before despawning. This tool routes "
-                "Baritone to that point so you can retrieve what you lost. No "
-                f"arguments. CHUNKED: each call advances at most "
-                f"{GOTO_CORPSE_MAX_PER_CALL} blocks toward the corpse; for "
-                "distant corpses just call goto_corpse() again until the result "
-                "no longer says 'more — call goto_corpse() again'. Returns "
-                "FAILED if you haven't died this session."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "build_shelter",
             "description": (
                 "Build a stone shelter around your current position. Carves a "
@@ -514,6 +495,51 @@ TOOLS = [
                 "DESIGNED FOR OPEN SURFACE TERRAIN — underground / cave / "
                 "encased starts often fail; surface yourself first if you're "
                 "in a tunnel or pocket."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wall_in",
+            "description": (
+                "Tactical retreat: tunnel 3 cells into the nearest cardinal "
+                "wall and seal yourself in. Picks a direction with a 3-deep "
+                "solid wall at your head+feet, digs a 1×2 corridor, then "
+                "places blocks 1 cell in from the entrance — leaving a 1-cell "
+                "foyer + a 2-cell back cavity for you. Use when caught "
+                "underground after evasion fires, or when night catches you "
+                "in a cave with no shelter materials. Needs to be flush "
+                "against a cave wall or hillside; on open ground use "
+                "build_shelter instead. The tunnel itself produces enough "
+                "stone for the seal. To break out, mine_stone(1) from inside."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "carve_alcove",
+            "description": (
+                "Convert a tactical wall_in pocket into a working shelter. "
+                "Carves a 2×3 alcove off your back cavity (2 cells forward, "
+                "3 cells wide) — enough room for a crafting_table, furnace, "
+                "and bed. Requires you've already called wall_in and are "
+                "still inside it. Refuses if water/lava is in the wall "
+                "(cave-adjacent). The seal stays intact — you're still safe "
+                "from mobs while carving. After: place crafting_table / "
+                "furnace / bed with the normal place() tool inside the new "
+                "chamber."
             ),
             "parameters": {
                 "type": "object",
@@ -547,6 +573,33 @@ TOOLS = [
                     },
                 },
                 "required": ["direction", "distance"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "look_around",
+            "description": (
+                "Get a natural-language description of the surrounding terrain, "
+                "hazards (water, lava, drops, exposed caves), and resources "
+                "(trees, ores, structures) in the chunks around the player. "
+                "A scout subagent reads the block scan and condenses it into "
+                "a short paragraph with cardinal direction hints. Useful for "
+                "deciding which way to travel, or confirming surroundings "
+                "before committing to a plan. Latency: radius=1 ~3s (1 chunk, "
+                "just current), radius=2 ~5s (3×3), radius=3 ~8s (5×5). "
+                "Does NOT mine, place, or move the player — read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "radius": {
+                        "type": "integer",
+                        "description": "Chunk radius. 1 = current chunk only, 2 = 3×3 (default), 3 = 5×5.",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -1559,11 +1612,8 @@ def _craft_recursive(item: str, count: int, _depth: int = 0) -> str:
         if reason == "requires_crafting_table" and not resp.get("crafting_table_nearby"):
             # Silent fall-back at the outermost call only: if home is set and
             # we haven't tried it this call, return there before placing a new
-            # table. No-op when home was never saved. Skipped during
-            # shelter-night lockout — the home is typically OUTSIDE the
-            # shelter and Baritone walking the player there at night triggers
-            # watcher disarm + open-ground death (r7 T22).
-            if _depth == 0 and _HOME_POS is not None and not home_attempted and not _SHELTER_NIGHT_LOCKOUT:
+            # table. No-op when home was never saved.
+            if _depth == 0 and _HOME_POS is not None and not home_attempted:
                 home_attempted = True
                 # Recipe is in scope as `item`; protect throwaway-set ingredients.
                 ap, tw, ehb = _throwaway_policy(item, count)
@@ -1586,19 +1636,6 @@ def _craft_recursive(item: str, count: int, _depth: int = 0) -> str:
         return f"FAILED: {reason} ({message})"
 
     return f"FAILED: exhausted retries for {item}"
-
-
-# Set by the agent loop when the shelter watcher is armed AND time is night.
-# Read by _craft_recursive to suppress the goto_home fallback — the home table
-# is typically outside the shelter, and Baritone walking the player there at
-# night triggers the drift-disarm + open-ground death pattern (r7 T22 1:0.4min).
-_SHELTER_NIGHT_LOCKOUT = False
-
-
-def set_shelter_night_lockout(on: bool) -> None:
-    """Toggle the night-armed lockout. Called by agent before each dispatch."""
-    global _SHELTER_NIGHT_LOCKOUT
-    _SHELTER_NIGHT_LOCKOUT = bool(on)
 
 
 def handle_craft(args: dict) -> str:
@@ -1735,6 +1772,67 @@ def handle_descend(args: dict) -> str:
     )
 
 
+_TRAVEL_HAZARD_IDS: frozenset[str] = frozenset({
+    "minecraft:lava",
+})
+
+# Clamp the agent to N blocks before the nearest hazard. Pulls them back
+# far enough that one more autonomous tick (e.g., Baritone overshoot) is
+# still safe. 2 blocks chosen because Baritone's `arrival_tolerance` for
+# /baritone/goto is 2 — anything tighter lands inside the tolerance band.
+_TRAVEL_HAZARD_SAFETY_MARGIN: int = 2
+
+
+def _travel_hazard_scan(
+    px: int, py: int, pz: int,
+    dx_unit: int, dz_unit: int,
+    distance: int,
+) -> list[tuple[int, int, int, str, int]]:
+    """Pre-flight scan along a cardinal travel corridor for surface-level
+    hazards (currently just lava).
+
+    Scans the chunks the path crosses, vertical slice player Y ±1 (the
+    cells the player would actually walk through). Per-chunk volume:
+    16×16×3 = 768, well under the 2000 cap. Hazards that are within ±3
+    blocks perpendicular of the path line and inside [0, distance] along
+    it are returned, sorted by along-axis distance so callers get the
+    nearest one first.
+
+    Returns a list of ``(x, y, z, id, along_blocks)``. Empty list means
+    the corridor is clear (or every touched chunk failed to scan; we treat
+    "no signal" as "no hazard" rather than blocking on a transport hiccup).
+    """
+    path_chunks: set[tuple[int, int]] = set()
+    for step in range(0, distance + 1, 4):
+        x = px + dx_unit * step
+        z = pz + dz_unit * step
+        path_chunks.add((x >> 4, z >> 4))
+    end_x = px + dx_unit * distance
+    end_z = pz + dz_unit * distance
+    path_chunks.add((end_x >> 4, end_z >> 4))
+
+    hazards: list[tuple[int, int, int, str, int]] = []
+    for cx, cz in path_chunks:
+        x1, z1 = cx * 16, cz * 16
+        x2, z2 = x1 + 15, z1 + 15
+        y1, y2 = py - 1, py + 1
+        scan = _scan_blocks(x1, y1, z1, x2, y2, z2)
+        if scan.get("success") is False:
+            continue
+        for b in scan.get("blocks", []):
+            bid = b.get("id")
+            if bid not in _TRAVEL_HAZARD_IDS:
+                continue
+            bx, by, bz = b["x"], b["y"], b["z"]
+            along = (bx - px) * dx_unit + (bz - pz) * dz_unit
+            perp = abs((bx - px) * dz_unit - (bz - pz) * dx_unit)
+            if 0 <= along <= distance and perp <= 3:
+                hazards.append((bx, by, bz, bid, along))
+
+    hazards.sort(key=lambda h: h[4])
+    return hazards
+
+
 def handle_travel(args: dict) -> str:
     direction = str(args.get("direction", "")).lower()
     try:
@@ -1746,13 +1844,13 @@ def handle_travel(args: dict) -> str:
         return "FAILED: distance must be a positive integer"
 
     if direction == "north":
-        dx, dz = 0, -distance
+        dx_unit, dz_unit = 0, -1
     elif direction == "south":
-        dx, dz = 0, distance
+        dx_unit, dz_unit = 0, 1
     elif direction == "east":
-        dx, dz = distance, 0
+        dx_unit, dz_unit = 1, 0
     elif direction == "west":
-        dx, dz = -distance, 0
+        dx_unit, dz_unit = -1, 0
     else:
         return f"FAILED: unknown direction '{direction}' (must be north/south/east/west)"
 
@@ -1764,6 +1862,36 @@ def handle_travel(args: dict) -> str:
         return "FAILED: malformed /position response"
     px, py, pz = xyz
 
+    # Travel-scout interlock: pre-flight scan for lava (and future hazard
+    # block types) along the corridor. Clamp the distance to stop short of
+    # the nearest hazard rather than refusing the call — honors the
+    # no-dispatch-guards principle: the action still happens, but safely.
+    hazards = _travel_hazard_scan(px, py, pz, dx_unit, dz_unit, distance)
+    clamp_note = ""
+    if hazards:
+        hx, hy, hz, hid, along = hazards[0]
+        safe_distance = max(0, along - _TRAVEL_HAZARD_SAFETY_MARGIN)
+        short_id = hid.removeprefix("minecraft:")
+        if safe_distance <= 0:
+            return (
+                f"FAILED: {short_id} at ({hx},{hy},{hz}) is right next to you "
+                f"({along} blocks {direction}); refusing zero-distance travel. "
+                f"Try a different direction."
+            )
+        if safe_distance < distance:
+            print(
+                f"  [travel] hazard clamp: {short_id} at ({hx},{hy},{hz}) "
+                f"{along} blocks {direction}; clamping distance {distance}→{safe_distance}",
+                flush=True,
+            )
+            clamp_note = (
+                f" (clamped from {distance} — {short_id} at ({hx},{hy},{hz}) "
+                f"is {along} blocks {direction}; stopped {_TRAVEL_HAZARD_SAFETY_MARGIN} short)"
+            )
+            distance = safe_distance
+
+    dx = dx_unit * distance
+    dz = dz_unit * distance
     tx = px + dx
     tz = pz + dz
     print(f"  [travel] {direction} {distance}: ({px},{py},{pz}) → ({tx},{py},{tz})", flush=True)
@@ -1775,8 +1903,8 @@ def handle_travel(args: dict) -> str:
     moved = max(abs(fx - px), abs(fz - pz))
     if moved < 2:
         reason = resp.get("reason", "unknown")
-        return f"FAILED: barely moved ({moved} blocks {direction}) from ({px},{py},{pz}) — Baritone {reason}; try different direction"
-    return f"traveled {direction}: moved {moved} blocks (target {distance}); now at ({fx},{fy},{fz})"
+        return f"FAILED: barely moved ({moved} blocks {direction}) from ({px},{py},{pz}) — Baritone {reason}; try different direction{clamp_note}"
+    return f"traveled {direction}: moved {moved} blocks (target {distance}); now at ({fx},{fy},{fz}){clamp_note}"
 
 
 def _fill_plate(
@@ -2011,9 +2139,16 @@ def handle_build_shelter(args: dict) -> str:
             if "water" not in bid and "lava" not in bid:
                 floor_solid += 1
     if floor_solid < 10:
+        burrow_dir = _viable_burrow_direction(px, py, pz)
+        burrow_hint = (
+            f" — OR call wall_in() (solid wall to your {burrow_dir}, "
+            f"tunneling produces enough cobble to seal it)"
+            if burrow_dir else ""
+        )
         return (
             f"ABORTED: floor footprint at y={py - 1} has only "
             f"{floor_solid}/25 solid cells — relocate to flatter ground"
+            f"{burrow_hint}"
         )
 
     # Pre-flight 5: enough buildables to seal the shell. Underestimating burns
@@ -2048,7 +2183,20 @@ def handle_build_shelter(args: dict) -> str:
         # explicit suggested-quantity, the agent defaulted to mine_stone(1)
         # and burned ~5 turns ticking the shortfall down by 1 per call.
         suggested = min(shortfall, MAX_QUANTITY)
+        burrow_dir = _viable_burrow_direction(px, py, pz)
         if is_night:
+            # Burrow is the canonical fix here: agent4 prm0 T8 hit this exact
+            # path (28 buildables underground), then died T11 because the
+            # static prompt hint never got re-read mid-rollout.
+            if burrow_dir:
+                return (
+                    f"ABORTED at NIGHT: only {total_buildable} buildables at "
+                    f"({px},{py},{pz}) ({have_str}); need ≥{NIGHT_BUDGET_MIN} for a "
+                    f"partial seal (short by {shortfall}). Call wall_in() — "
+                    f"there's a solid wall to your {burrow_dir} and tunneling "
+                    f"produces 6 cobble (enough to seal). If that fails, "
+                    f"wait for dawn: call craft('stick', 1) until time=DAY."
+                )
             return (
                 f"ABORTED at NIGHT: only {total_buildable} buildables at "
                 f"({px},{py},{pz}) ({have_str}); need ≥{NIGHT_BUDGET_MIN} for a "
@@ -2057,12 +2205,17 @@ def handle_build_shelter(args: dict) -> str:
                 f"call craft('stick', 1) or any other idle in-place tool until "
                 f"time=DAY, then mine + build."
             )
+        burrow_hint = (
+            f" Or call wall_in() — solid wall to your {burrow_dir}, "
+            f"tunneling produces enough cobble to seal."
+            if burrow_dir else ""
+        )
         return (
             f"ABORTED: not enough buildable blocks at ({px},{py},{pz}) — "
             f"have {total_buildable} ({have_str}), need ~{SHELTER_BUDGET_MIN} "
             f"to seal a 5×2×5 shelter (short by {shortfall}). "
             f"Call mine_stone(quantity={suggested}) — or mine_wood(quantity={suggested}) "
-            f"if trees are closer — to close the gap in one step."
+            f"if trees are closer — to close the gap in one step.{burrow_hint}"
         )
 
     # Extend Baritone's pathfinder-throwaway allowlist BEFORE any fill — without
@@ -2467,72 +2620,398 @@ def handle_build_shelter(args: dict) -> str:
     )
 
 
-def handle_goto_corpse(args: dict) -> str:
-    resp = _get_homunculus("/deaths")
-    deaths = resp.get("deaths", [])
-    if not deaths:
-        return "FAILED: no deaths this session — nothing to go back to"
-    last = deaths[-1]
-    cx, cy, cz = last["death_pos"]
-    cause = last.get("cause", "unknown")
-    pos = _position()
-    xyz = _read_xyz(pos) or (0, 0, 0)
-    px, py, pz = xyz
+# --- burrow ----------------------------------------------------------------
+# Tactical 1×2 sideways tunnel into a wall with a 1-cell foyer + seal at
+# cell-index-2 + 1-cell back cavity. Pairs with reflexive /evasion: evasion
+# buys ~3s to flee, burrow converts that to a sealed pocket. Distinct from
+# build_shelter (which expects open sky); burrow expects an adjacent wall.
 
-    # Distance from current position to corpse (Euclidean).
-    dx, dy, dz = cx - px, cy - py, cz - pz
-    dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-    if dist <= 3:
+# Seal-block preference. Tunneled cobble lands here first 99% of the time;
+# the fallbacks cover dirt/stone-variant walls and the rare "I had nothing
+# but I tunneled into deepslate" case.
+_BURROW_SEAL_PRIORITY: tuple[str, ...] = (
+    "minecraft:cobblestone",
+    "minecraft:cobbled_deepslate",
+    "minecraft:stone",
+    "minecraft:deepslate",
+    "minecraft:granite", "minecraft:diorite", "minecraft:andesite", "minecraft:tuff",
+    "minecraft:dirt", "minecraft:coarse_dirt",
+    "minecraft:netherrack", "minecraft:blackstone", "minecraft:basalt",
+)
+
+# Cells that disqualify a direction even if the rest of the wall is solid —
+# we don't want to tunnel into water (drowning) or lava (instant death).
+_BURROW_HAZARD_IDS: frozenset[str] = frozenset({
+    "minecraft:water", "minecraft:lava",
+    "minecraft:flowing_water", "minecraft:flowing_lava",
+})
+
+# Active burrow state, consumed by agent._fetch_stats for ambient hinting.
+# Shape: {"anchor": (x,y,z), "seal": (x,y,z), "direction": str} or None.
+_burrow_state: dict | None = None
+
+
+def get_burrow_state() -> dict | None:
+    """Return current burrow state (anchor, seal, direction) or None."""
+    return _burrow_state
+
+
+def clear_burrow_state() -> None:
+    """Reset burrow state. Called when agent dies / between rollouts."""
+    global _burrow_state
+    _burrow_state = None
+
+
+def _inventory_counts() -> dict[str, int]:
+    """Aggregate inventory ids → counts. Returns {} on transport failure."""
+    try:
+        r = requests.get(f"{HOMUNCULUS_BASE}/inventory", timeout=5.0)
+        r.raise_for_status()
+        inv = r.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    counts: dict[str, int] = {}
+    for slot in inv.get("main", []) or []:
+        sid = slot.get("id")
+        if sid:
+            counts[sid] = counts.get(sid, 0) + int(slot.get("count", 0))
+    off = inv.get("offhand")
+    if off and off.get("id"):
+        counts[off["id"]] = counts.get(off["id"], 0) + int(off.get("count", 0))
+    return counts
+
+
+def _pick_seal_item(needed: int = 2) -> str | None:
+    counts = _inventory_counts()
+    for candidate in _BURROW_SEAL_PRIORITY:
+        if counts.get(candidate, 0) >= needed:
+            return candidate
+    return None
+
+
+def _wall_viable(px: int, py: int, pz: int, dx: int, dz: int) -> tuple[bool, str]:
+    """Check if 3-deep × 2-high wall is fully solid (no air/lava/water).
+
+    Returns (viable, reason). reason is empty on success, else describes
+    the first failure cell for diagnostic.
+    """
+    x_a, x_b = px + dx * 1, px + dx * 3
+    z_a, z_b = pz + dz * 1, pz + dz * 3
+    x1, x2 = min(x_a, x_b), max(x_a, x_b)
+    z1, z2 = min(z_a, z_b), max(z_a, z_b)
+    scan = _scan_blocks(x1, py, z1, x2, py + 1, z2)
+    if scan.get("success") is False:
+        return False, f"scan_blocks failed: {scan.get('reason')}"
+    blocks = {(b["x"], b["y"], b["z"]): b for b in scan.get("blocks", [])}
+    for step in (1, 2, 3):
+        for dy in (0, 1):
+            cell = (px + dx * step, py + dy, pz + dz * step)
+            b = blocks.get(cell)
+            if b is None:
+                return False, f"air at cell {cell}"
+            if b.get("id") in _BURROW_HAZARD_IDS:
+                return False, f"hazard {b['id']} at cell {cell}"
+            if b.get("passable"):
+                return False, f"passable {b.get('id')} at cell {cell}"
+    return True, ""
+
+
+def _viable_burrow_direction(px: int, py: int, pz: int) -> str | None:
+    """Return the first cardinal direction with a viable burrow wall, or None.
+
+    Used by build_shelter's ABORT path to surface burrow as a fallback at
+    the moment of decision — the strategy hint in the system prompt is
+    invisible by the time these aborts fire (buried under tool outcomes).
+    """
+    for d in ("east", "west", "north", "south"):
+        dx, dz = _DIR_VEC[d]
+        ok, _ = _wall_viable(px, py, pz, dx, dz)
+        if ok:
+            return d
+    return None
+
+
+def handle_burrow(args: dict) -> str:
+    global _burrow_state
+    pos_resp = _position()
+    if pos_resp.get("success") is False:
+        return f"FAILED: position read failed ({pos_resp.get('reason')})"
+    try:
+        px = int(pos_resp["x"])
+        py = int(pos_resp["y"])
+        pz = int(pos_resp["z"])
+        yaw = float(pos_resp.get("yaw", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return "FAILED: malformed /position response"
+
+    # Try directions in priority order: current facing first (the most likely
+    # wall the agent is already pressed against), then the others.
+    facing = _yaw_to_direction(yaw)
+    cardinals = [facing] + [d for d in ("east", "west", "north", "south") if d != facing]
+
+    chosen: str | None = None
+    last_reason = ""
+    for d in cardinals:
+        dx, dz = _DIR_VEC[d]
+        ok, reason = _wall_viable(px, py, pz, dx, dz)
+        if ok:
+            chosen = d
+            break
+        last_reason = f"{d}: {reason}"
+        print(f"  [burrow] {d} not viable — {reason}", flush=True)
+
+    if chosen is None:
         return (
-            f"arrived at corpse ({cx},{cy},{cz}); corpse cause was {cause}. "
-            f"Walk over the area to pick up drops if they haven't despawned. "
-            f"This area killed you — leave once collected."
+            f"FAILED: no_wall_found — no cardinal has a 3-deep solid wall at "
+            f"y={py}-{py+1}. Last check: {last_reason}. You're not flush "
+            f"against a wall — travel into a cave wall / hillside first, "
+            f"or use build_shelter() if you're on open ground."
         )
 
-    # Chunked routing: clamp each call to GOTO_CORPSE_MAX_PER_CALL toward the
-    # corpse along the player→corpse line. Multi-axis analogue of the descend /
-    # surface chunking. Same rationale: long Baritone goto's PARTIAL out, but
-    # chunking gives the planner control back every N blocks while letting it
-    # just call again to keep going.
-    if dist > GOTO_CORPSE_MAX_PER_CALL:
-        scale = GOTO_CORPSE_MAX_PER_CALL / dist
-        tx = int(px + dx * scale)
-        ty = int(py + dy * scale)
-        tz = int(pz + dz * scale)
-    else:
-        tx, ty, tz = cx, cy, cz
-
+    dx, dz = _DIR_VEC[chosen]
+    # Excavate the 3-cell × 2-high corridor (foot + head). Cell coords:
+    #   cell 1 (foyer)        = (px+dx,   py..py+1, pz+dz)
+    #   cell 2 (seal target)  = (px+2dx,  py..py+1, pz+2dz)
+    #   cell 3 (back cavity)  = (px+3dx,  py..py+1, pz+3dz)
+    x_a, x_b = px + dx * 1, px + dx * 3
+    z_a, z_b = pz + dz * 1, pz + dz * 3
+    x1, x2 = min(x_a, x_b), max(x_a, x_b)
+    z1, z2 = min(z_a, z_b), max(z_a, z_b)
     print(
-        f"  [goto_corpse] ({px},{py},{pz}) → chunk ({tx},{ty},{tz}) "
-        f"final ({cx},{cy},{cz}) {dist:.1f}b away (cause: {cause})",
+        f"  [burrow] {chosen}: excavating ({x1},{py},{z1})→({x2},{py+1},{z2})",
         flush=True,
     )
-    bgoto = _baritone_goto(tx, ty, tz, timeout_seconds=60)
-    final = _final_xyz(bgoto) or xyz
+    ex = _baritone_excavate(x1, py, z1, x2, py + 1, z2, timeout_seconds=60)
+    if ex.get("success") is False:
+        return (
+            f"FAILED: excavate refused ({ex.get('reason')}: {ex.get('message')}). "
+            f"Try again or surface() to find a different wall."
+        )
+    # remaining=0 is the success signal; >0 means baritone bailed early.
+    remaining = ex.get("remaining")
+    if isinstance(remaining, (int, float)) and remaining > 0:
+        return (
+            f"FAILED: tunnel only partially dug ({remaining} cells remain). "
+            f"You're probably exposed at the entrance — try wall_in() again, "
+            f"or build_shelter() if you have buildable blocks."
+        )
+
+    # Walk into the back cavity. Critical: player MUST NOT be standing in the
+    # seal cell or /place_at returns target_blocked. Default Baritone tolerance
+    # (2 blocks) is too loose — agent often stops at the seal cell mid-walk.
+    # arrival_tolerance=0 forces Baritone to put the player exactly at the
+    # back-cavity block.
+    back_x = px + dx * 3
+    back_z = pz + dz * 3
+    seal_x = px + dx * 2
+    seal_z = pz + dz * 2
+    bgoto = _baritone_goto(back_x, py, back_z, timeout_seconds=15, arrival_tolerance=0)
+    final = _final_xyz(bgoto) or (px, py, pz)
     fx, fy, fz = final
+    # Verify player is NOT in the seal cell (would block placement). Float
+    # position needs floor-rounding to compare to int block coords.
+    fbx = math.floor(fx)
+    fbz = math.floor(fz)
+    if fbx == seal_x and fbz == seal_z:
+        # Retry with a small forward nudge — Baritone sometimes parks on the
+        # block before its goal when arrival_tolerance has odd float rounding.
+        bgoto2 = _baritone_goto(back_x, py, back_z, timeout_seconds=8, arrival_tolerance=0)
+        final = _final_xyz(bgoto2) or final
+        fx, fy, fz = final
+        fbx = math.floor(fx)
+        fbz = math.floor(fz)
+        if fbx == seal_x and fbz == seal_z:
+            return (
+                f"PARTIAL: tunnel dug but player stuck at seal cell "
+                f"({fbx},{int(fy)},{fbz}) — Baritone won't advance to back "
+                f"cavity ({back_x},{py},{back_z}). Manually walk forward 1 "
+                f"block, then place 2 cobblestone at ({seal_x},{py},{seal_z}) "
+                f"and ({seal_x},{py+1},{seal_z})."
+            )
 
-    rdx, rdy, rdz = cx - fx, cy - fy, cz - fz
-    remaining = (rdx * rdx + rdy * rdy + rdz * rdz) ** 0.5
-    if remaining <= 3:
+    seal_item = _pick_seal_item(needed=2)
+    if seal_item is None:
         return (
-            f"arrived at corpse ({cx},{cy},{cz}); corpse cause was {cause}. "
-            f"Walk over the area to pick up drops if they haven't despawned. "
-            f"This area killed you — leave once collected."
+            f"PARTIAL: tunnel dug at ({back_x},{py},{back_z}) facing {chosen} "
+            f"but no placeable blocks for seal (need ≥2 of "
+            f"cobble/stone/dirt). Mine cobble or break the wall to refill, "
+            f"then call wall_in() again — or place blocks manually."
         )
 
-    cdx, cdy, cdz = tx - fx, ty - fy, tz - fz
-    chunk_dist = (cdx * cdx + cdy * cdy + cdz * cdz) ** 0.5
-    if chunk_dist <= 3:
+    sx = px + dx * 2
+    sz = pz + dz * 2
+    # Foot first (cell 2 at y=py), then head (y=py+1). Head needs the foot as
+    # support attachment; reverse order can fail with no_adjacent_face.
+    foot = _place_at_raw(seal_item, sx, py, sz)
+    if foot.get("success") is False:
         return (
-            f"approached corpse: at ({fx},{fy},{fz}), corpse at ({cx},{cy},{cz}), "
-            f"{remaining:.0f} more — call goto_corpse() again to continue (cause: {cause})"
+            f"PARTIAL: tunnel dug but seal foot placement failed at "
+            f"({sx},{py},{sz}): {foot.get('reason')}. You're exposed — "
+            f"manually place 2 {seal_item.split(':')[-1]} at "
+            f"({sx},{py},{sz}) and ({sx},{py+1},{sz})."
+        )
+    head = _place_at_raw(seal_item, sx, py + 1, sz)
+    if head.get("success") is False:
+        return (
+            f"PARTIAL: foot sealed but head failed at ({sx},{py+1},{sz}): "
+            f"{head.get('reason')}. Mob-sized gap remains — manually place "
+            f"1 {seal_item.split(':')[-1]} at ({sx},{py+1},{sz})."
         )
 
-    reason = bgoto.get("reason", "unknown")
+    _burrow_state = {
+        "anchor": (back_x, py, back_z),
+        "seal": (sx, py, sz),
+        "direction": chosen,
+    }
     return (
-        f"PARTIAL: at ({fx},{fy},{fz}), corpse at ({cx},{cy},{cz}), "
-        f"{remaining:.0f} more — Baritone {reason}; switch strategy "
-        f"(mine_stone(8) by hand, or travel toward the corpse manually)"
+        f"walled in at ({back_x},{py},{back_z}) facing {chosen}; "
+        f"sealed with 2× {seal_item.split(':')[-1]} at "
+        f"({sx},{py},{sz})+({sx},{py+1},{sz}). Foyer cell at "
+        f"({px+dx},{py},{pz+dz}) is open but mob-occupiable. To exit: "
+        f"mine_stone(1) to break through the seal."
+    )
+
+
+def handle_expand_burrow(args: dict) -> str:
+    """Productive conversion: carve a 2×3 alcove off the back cavity.
+
+    Pre-req: an active burrow (_burrow_state set) and the agent still
+    inside it. Excavates 2 deeper cells + 1 lateral cell on each side at
+    the deep end — fits crafting_table, furnace, and bed. Seal stays
+    untouched. Refuses when water/lava is detected in the target volume.
+    """
+    global _burrow_state
+    bstate = _burrow_state
+    if bstate is None:
+        return (
+            "FAILED: no_active_wall_in — call wall_in() first. carve_alcove "
+            "carves a 2×3 chamber off your back cavity for crafting/furnace "
+            "placement, but you need a sealed pocket to extend."
+        )
+
+    direction = bstate.get("direction")
+    if direction not in _DIR_VEC:
+        return f"FAILED: corrupted wall_in state (direction='{direction}')"
+    dx, dz = _DIR_VEC[direction]
+    # Perpendicular axis (90° CCW from forward). For east (dx=1,dz=0) →
+    # (0, 1) = south; for north (0,-1) → (1, 0) = east; etc.
+    perp_dx, perp_dz = -dz, dx
+
+    bx, by, bz = bstate["anchor"]
+
+    pos_resp = _position()
+    if pos_resp.get("success") is False:
+        return f"FAILED: position read failed ({pos_resp.get('reason')})"
+    try:
+        px = int(pos_resp["x"])
+        py = int(pos_resp["y"])
+        pz = int(pos_resp["z"])
+    except (KeyError, TypeError, ValueError):
+        return "FAILED: malformed /position response"
+
+    # Stale-burrow guard. Anchor is from when burrow() returned; if the
+    # agent has wandered (e.g. broke the seal and walked out) the alcove
+    # geometry is no longer relative to where they stand.
+    drift = abs(px - bx) + abs(pz - bz)
+    if drift > 4:
+        return (
+            f"FAILED: drifted_from_wall_in — anchor at ({bx},{by},{bz}) "
+            f"but you're at ({px},{py},{pz}) — {drift}b away. Walk back "
+            f"inside your sealed pocket before calling carve_alcove."
+        )
+
+    # Alcove footprint. Cells are at d_step ∈ {1,2} forward and
+    # p_step ∈ {-1,0,1} lateral, relative to the back cavity (bx,by,bz):
+    #   forward 1 + lateral {-1,0,1}  → 3 cells (one row 1 deep into wall)
+    #   forward 2 + lateral {-1,0,1}  → 3 cells (one row 2 deep into wall)
+    # Total 6 cells × 2 layers = 12 block breaks. AABB is the bounding box
+    # of those 6 cells, which for any cardinal direction is exactly 2×3.
+    corners = []
+    for d_step in (1, 2):
+        for p_step in (-1, 1):
+            cx = bx + dx * d_step + perp_dx * p_step
+            cz = bz + dz * d_step + perp_dz * p_step
+            corners.append((cx, cz))
+    xs = [c[0] for c in corners]
+    zs = [c[1] for c in corners]
+    ax1, ax2 = min(xs), max(xs)
+    az1, az2 = min(zs), max(zs)
+
+    # Hazard pre-scan. Refuse if any cell in the alcove volume is water/
+    # lava — carving into them would flood the burrow.
+    scan = _scan_blocks(ax1, by, az1, ax2, by + 1, az2)
+    if scan.get("success") is False:
+        return f"FAILED: scan refused: {scan.get('reason')}: {scan.get('message')}"
+    for b in scan.get("blocks", []):
+        if b.get("id") in _BURROW_HAZARD_IDS:
+            return (
+                f"FAILED: hazard {b['id']} at ({b['x']},{b['y']},{b['z']}) "
+                f"in the wall — would flood your pocket. Stay where you are; "
+                f"the seal is still intact."
+            )
+
+    print(
+        f"  [expand_burrow] excavating alcove "
+        f"({ax1},{by},{az1})→({ax2},{by+1},{az2}) (12 cells)",
+        flush=True,
+    )
+    ex = _baritone_excavate(ax1, by, az1, ax2, by + 1, az2, timeout_seconds=90)
+    if ex.get("success") is False:
+        return (
+            f"FAILED: excavate refused ({ex.get('reason')}: {ex.get('message')}). "
+            f"Seal is unchanged — you're still safe inside."
+        )
+    remaining = ex.get("remaining")
+    if isinstance(remaining, (int, float)) and remaining > 0:
+        return (
+            f"PARTIAL: alcove only partially carved ({remaining} cells "
+            f"remain). Seal still intact. Call carve_alcove() again "
+            f"to finish, or use the partial chamber as-is."
+        )
+
+    _burrow_state = {
+        **bstate,
+        "alcove_aabb": (ax1, by, az1, ax2, by + 1, az2),
+    }
+    return (
+        f"alcove carved: 2×3 chamber at ({ax1},{by},{az1})→({ax2},{by+1},{az2}) "
+        f"off your back cavity. Place crafting_table, furnace, and bed inside "
+        f"with place(). Seal at {bstate['seal']} is unchanged — "
+        f"mine_stone(1) when you want to leave."
+    )
+
+
+def handle_look_around(args: dict) -> str:
+    from craft.scout import describe_neighborhood
+
+    radius = int(args.get("radius", 2))
+    if radius < 1 or radius > 4:
+        return f"FAILED: radius must be 1-4, got {radius}"
+    # Env-var cap for ablations (e.g., force r=1 to test "constant
+    # scanning with smaller area"). Caps SILENTLY rather than failing —
+    # we want the agent to see the result, not a parameter-rejected error.
+    max_radius_env = os.environ.get("CRAFT_LOOK_AROUND_MAX_RADIUS")
+    if max_radius_env:
+        try:
+            max_radius = int(max_radius_env)
+            if radius > max_radius:
+                print(f"  [look_around] capping radius {radius} → {max_radius} (CRAFT_LOOK_AROUND_MAX_RADIUS)", flush=True)
+                radius = max_radius
+        except ValueError:
+            pass
+    print(f"  [look_around] radius={radius} ({(2*radius-1)**2} chunks)...", flush=True)
+    try:
+        result = describe_neighborhood(radius)
+    except Exception as e:
+        return f"FAILED: look_around error: {e}"
+    n = len(result["per_chunk"])
+    t = result["timings"]
+    cache = result.get("cache") or {"hits": 0, "total": n}
+    return (
+        f"[look_around radius={radius} chunks={n} "
+        f"fanout={t['fanout_s']:.1f}s unify={t['unify_s']:.1f}s "
+        f"cache_hits={cache['hits']}/{cache['total']}]\n"
+        f"{result['unified']}"
     )
 
 
@@ -2549,8 +3028,10 @@ HANDLERS = {
     "surface": handle_surface,
     "descend": handle_descend,
     "travel": handle_travel,
-    "goto_corpse": handle_goto_corpse,
     "build_shelter": handle_build_shelter,
+    "wall_in": handle_burrow,
+    "carve_alcove": handle_expand_burrow,
+    "look_around": handle_look_around,
 }
 
 

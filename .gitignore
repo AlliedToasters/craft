@@ -23,3 +23,6 @@ zombie_*.txt
 
 # Pre-refactor backup file; superseded by craft/tools.py
 toolsbackup.py
+
+# Local Claude Code state (scheduled-tasks lock, etc.)
+.claude/

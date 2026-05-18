@@ -44,6 +44,11 @@ BAD_BIOMES: tuple[str, ...] = (
     "windswept_hills", "windswept_gravelly_hills", "windswept_forest",
     # Bamboo jungle: mine_wood fails (bamboo ≠ log; crafting support deferred).
     "bamboo_jungle", "sparse_bamboo_jungle",
+    # Stony shore: technically habitable but trees are out of scan radius;
+    # 2026-05-16 concurrent rollout agent2 stuck T50 with 45/50 FAILED
+    # mine_wood. Until salvage-from-structures (issue #7) lands, treat as
+    # spawn trap.
+    "stony_shore",
 )
 
 
