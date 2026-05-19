@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import math
 import random as _random
+import re
 import time
 from typing import Callable, Optional
 
 import requests
+
+
+_INVERTED_Y_RE = re.compile(r"column_inverted\(y=(-?\d+)\)")
 
 from craft.world import set_gamemode
 
@@ -131,10 +135,12 @@ def random_spawn(
     server_cmd_base: str,
     player_name: str,
     drop_y: int = 100,
-    max_retries: int = 8,
+    max_retries: int = 12,
     bad_biomes: tuple[str, ...] = BAD_BIOMES,
     column_inverted_margin: int = 5,
     column_cave_fall_max: int = 50,
+    column_inverted_bump_after: int = 2,
+    column_inverted_bump_dy: int = 40,
     anchor_xz: Optional[tuple[int, int]] = None,
     rng: Optional[_random.Random] = None,
     verbose: bool = True,
@@ -176,14 +182,16 @@ def random_spawn(
     else:
         ax, az = anchor_xz
 
-    def _attempt(dx: int, dz: int) -> tuple[bool, str]:
+    def _attempt(dx: int, dz: int, *, this_drop_y: int,
+                 this_cave_fall_max: int) -> tuple[bool, str]:
         tx = ax + dx
         tz = az + dz
         if verbose:
-            log(f"[spawn] tp to ({tx},{drop_y},{tz}) (offset {dx},{dz} from {ax},{az})")
+            log(f"[spawn] tp to ({tx},{this_drop_y},{tz}) "
+                f"(offset {dx},{dz} from {ax},{az})")
         set_gamemode("creative", player_name=player_name,
                      server_cmd_base=server_cmd_base)
-        _server_cmd(server_cmd_base, f"tp {player_name} {tx} {drop_y} {tz}")
+        _server_cmd(server_cmd_base, f"tp {player_name} {tx} {this_drop_y} {tz}")
         _server_cmd(server_cmd_base, f"clear {player_name}")
         landed = False
         for _ in range(20):
@@ -202,9 +210,9 @@ def random_spawn(
         if ly_raw is not None:
             landing_y = int(math.floor(float(ly_raw)))
             reason = _classify_landing(
-                landing_y, drop_y,
+                landing_y, this_drop_y,
                 inverted_margin=column_inverted_margin,
-                cave_fall_max=column_cave_fall_max,
+                cave_fall_max=this_cave_fall_max,
             )
             if reason is not None:
                 return False, reason
@@ -232,12 +240,27 @@ def random_spawn(
 
     attempts: list[dict] = []
     last_tp: tuple[int, int, int] | None = None
+    # Adaptive retry: when column_inverted fires repeatedly the region has
+    # terrain peaking above drop_y. Track max observed landing_y; after
+    # N inverted hits, raise drop_y above the peak (also bumping
+    # cave_fall_max proportionally so legit landings aren't reclassified).
+    current_drop_y = drop_y
+    current_cave_fall_max = column_cave_fall_max
+    inverted_count = 0
+    max_inverted_y = -10_000
     for attempt in range(1, max_retries + 1):
         dx = rng.randint(-range_blocks, range_blocks)
         dz = rng.randint(-range_blocks, range_blocks)
-        last_tp = (ax + dx, drop_y, az + dz)
-        ok, info = _attempt(dx, dz)
-        attempts.append({"dx": dx, "dz": dz, "ok": ok, "reason": info})
+        last_tp = (ax + dx, current_drop_y, az + dz)
+        ok, info = _attempt(
+            dx, dz,
+            this_drop_y=current_drop_y,
+            this_cave_fall_max=current_cave_fall_max,
+        )
+        attempts.append({
+            "dx": dx, "dz": dz, "ok": ok, "reason": info,
+            "drop_y": current_drop_y,
+        })
         if ok:
             if verbose:
                 log(f"[spawn] landed ok at attempt {attempt}: biome={info}")
@@ -253,6 +276,20 @@ def random_spawn(
             }
         if verbose:
             log(f"[spawn] attempt {attempt}/{max_retries} rejected: {info}")
+        m = _INVERTED_Y_RE.match(info)
+        if m:
+            inverted_count += 1
+            max_inverted_y = max(max_inverted_y, int(m.group(1)))
+            if inverted_count >= column_inverted_bump_after:
+                new_drop_y = max_inverted_y + column_inverted_bump_dy
+                if new_drop_y > current_drop_y:
+                    bumped_by = new_drop_y - drop_y
+                    current_drop_y = new_drop_y
+                    current_cave_fall_max = column_cave_fall_max + bumped_by
+                    if verbose:
+                        log(f"[spawn] adaptive: {inverted_count} column_inverted "
+                            f"hits (max y={max_inverted_y}); raising drop_y to "
+                            f"{current_drop_y} (cave_fall_max={current_cave_fall_max})")
 
     if verbose:
         log(f"[spawn] WARNING: exhausted {max_retries} retries; "
