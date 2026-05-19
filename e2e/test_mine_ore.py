@@ -54,7 +54,7 @@ SPECIES: dict[str, dict] = {
     "coal": {
         "source": "minecraft:coal_ore",
         "drops": {"minecraft:coal"},
-        "pickaxe": "minecraft:wooden_pickaxe",
+        "pickaxe": "minecraft:stone_pickaxe",
         "tool": "mine_coal",
     },
 }

@@ -123,7 +123,8 @@ def run_iter(
     sx, sy, sz = after_setup
     rec["start_pos"] = [sx, sy, sz]
 
-    cmd(f"give {PLAYER_NAME} minecraft:wooden_pickaxe 1")
+    cmd(f"give {PLAYER_NAME} minecraft:stone_pickaxe 1")
+    cmd(f"give {PLAYER_NAME} minecraft:stone_shovel 1")
     time.sleep(0.3)
 
     t0 = time.monotonic()

@@ -87,7 +87,7 @@ def run_iter(
     if verbose:
         print(f"[test] start_y={sy}, target_y={target_y}", flush=True)
 
-    cmd(f"give {PLAYER_NAME} minecraft:wooden_pickaxe 1")
+    cmd(f"give {PLAYER_NAME} minecraft:stone_pickaxe 1")
     time.sleep(0.3)
 
     t0 = time.monotonic()
