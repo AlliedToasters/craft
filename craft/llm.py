@@ -76,9 +76,15 @@ def chat_with_tools(
 ):
     """Tool-aware chat completion. Dispatches by model name.
 
-    Returns (tool_calls, content). tool_calls is a list of SimpleNamespace
-    objects with ``.id``, ``.function.name``, ``.function.arguments`` (JSON
-    string) — matches the OpenAI SDK shape the agent loop already consumes.
+    Returns (tool_calls, content, reasoning, raw_message). tool_calls is a
+    list of SimpleNamespace objects with ``.id``, ``.function.name``,
+    ``.function.arguments`` (JSON string) — matches the OpenAI SDK shape the
+    agent loop already consumes. ``reasoning`` is the model's chain-of-thought
+    when the provider surfaces it (Ollama's ``message.reasoning``), or "" when
+    not available (Anthropic without extended thinking, human driver).
+    ``raw_message`` is the full provider message dump (dict for Ollama via
+    OpenAI SDK, None otherwise) — preserved verbatim so anything the wire
+    schema exposes beyond the three parsed fields is auditable post-hoc.
     """
     if _is_human(model):
         return _chat_with_tools_human(messages, tools, model=model)
@@ -136,15 +142,22 @@ def _chat_with_tools_ollama(messages, tools, *, model):
         extra_body={"reasoning_effort": "low"},
     )
     msg = resp.choices[0].message
+    raw_message = (resp.choices[0].model_dump().get("message") or {})
     tool_calls = msg.tool_calls or []
     content = msg.content or ""
-    if not tool_calls and not content:
-        reasoning = (resp.choices[0].model_dump().get("message") or {}).get("reasoning") or ""
-        if reasoning:
-            tool_calls = _extract_from_reasoning(reasoning)
-            if tool_calls:
-                print(f"[llm] reasoning-fallback: extracted {tool_calls[0].function.name} from reasoning field", flush=True)
-    return tool_calls, content
+    reasoning = raw_message.get("reasoning") or ""
+    # Refusal is a corner case for local Qwen3-Instruct (no refusal RLHF in
+    # this checkpoint), but if it ever fires we want it loud in the log —
+    # would explain otherwise-mysterious empty turns. raw_message still
+    # captures the text into the JSONL for later inspection.
+    refusal = raw_message.get("refusal")
+    if refusal:
+        print(f"[llm][refusal] model emitted refusal: {refusal!r}", flush=True)
+    if not tool_calls and not content and reasoning:
+        tool_calls = _extract_from_reasoning(reasoning)
+        if tool_calls:
+            print(f"[llm] reasoning-fallback: extracted {tool_calls[0].function.name} from reasoning field", flush=True)
+    return tool_calls, content, reasoning, raw_message
 
 
 # ─────────────────────── Anthropic / Haiku path ─────────────────────────────
@@ -248,7 +261,7 @@ def _chat_with_tools_anthropic(messages, tools, *, model):
             tool_calls.append(tc)
         elif btype == "text":
             text_parts.append(getattr(block, "text", ""))
-    return tool_calls, "".join(text_parts)
+    return tool_calls, "".join(text_parts), "", None
 
 
 # ─────────────────────── Human / driver path ────────────────────────────────
@@ -334,7 +347,7 @@ def _chat_with_tools_human(messages, tools, *, model):  # noqa: ARG001 (model un
             print()
             # Empty tool_calls → agent loop's "no tool call returned; stopping"
             # path fires and the rollout ends gracefully. JSONL still flushes.
-            return [], ""
+            return [], "", "", None
         if not line:
             continue
         try:
@@ -344,7 +357,7 @@ def _chat_with_tools_human(messages, tools, *, model):  # noqa: ARG001 (model un
             continue
         head, rest = tokens[0], tokens[1:]
         if head in ("quit", "exit", "q"):
-            return [], ""
+            return [], "", "", None
         if head in ("help", "?"):
             _print_help()
             continue
@@ -370,7 +383,7 @@ def _chat_with_tools_human(messages, tools, *, model):  # noqa: ARG001 (model un
             type="function",
             function=SimpleNamespace(name=head, arguments=json.dumps(args)),
         )
-        return [tc], ""
+        return [tc], "", "", None
 
 
 if __name__ == "__main__":
@@ -383,7 +396,7 @@ if __name__ == "__main__":
     print()
     print("--- anthropic (claude-haiku-4-5) ---")
     try:
-        tcs, content = chat_with_tools(
+        tcs, content, _, _ = chat_with_tools(
             [
                 {"role": "system", "content": "You are a calculator."},
                 {"role": "user", "content": "Use the add tool to compute 2+3."},

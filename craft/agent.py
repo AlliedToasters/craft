@@ -969,7 +969,13 @@ def run(
         milestone_event = None
         print(f"\n=== turn {turn}/{max_turns}: planning ===")
         plan_start = time.perf_counter()
-        tool_calls, content = chat_with_tools(messages, TOOLS, model=model)
+        # Snapshot the prompt as passed to the model — load-bearing for
+        # the _type:"llm" record. messages[1] gets reassigned by milestones
+        # later in the turn (creating a new dict), and the list grows on
+        # assistant/tool appends, but `list(messages)` here freezes the
+        # references at call time so the snapshot stays faithful.
+        prompt_snapshot = list(messages)
+        tool_calls, content, reasoning, raw_message = chat_with_tools(messages, TOOLS, model=model)
         plan_dt = time.perf_counter() - plan_start
         plan_s_total += plan_dt
         plan_s_count += 1
@@ -984,12 +990,40 @@ def run(
                     break
                 retry_start = time.perf_counter()
                 print(f"[retry] empty response, retry {retry_i + 1}/{EMPTY_RETRIES}", flush=True)
-                tool_calls, content = chat_with_tools(messages, TOOLS, model=model)
+                tool_calls, content, reasoning, raw_message = chat_with_tools(messages, TOOLS, model=model)
                 retry_dt = time.perf_counter() - retry_start
                 plan_dt += retry_dt
                 plan_s_total += retry_dt
                 if content:
                     print(f"[content] {content!r}")
+
+        # Faithful per-turn LLM record (prompt + raw response) for replay /
+        # SFT data extraction. Written before the no-tool-call break so even
+        # failed plans are captured. `raw_message` is the full provider message
+        # dump (Ollama via OpenAI SDK) so anything beyond the three parsed
+        # fields — `refusal`, future schema extensions — is preserved verbatim.
+        if jsonl_fh is not None:
+            llm_rec = {
+                "_type": "llm",
+                "turn": turn,
+                "model": model,
+                "prompt_messages": prompt_snapshot,
+                "response": {
+                    "content": content or "",
+                    "reasoning": reasoning or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        }
+                        for tc in tool_calls
+                    ],
+                },
+            }
+            if raw_message is not None:
+                llm_rec["response"]["raw_message"] = raw_message
+            jsonl_fh.write(json.dumps(llm_rec) + "\n")
 
         if not tool_calls:
             print(f"=== no tool call returned; stopping (plan={plan_dt:.1f}s) ===")

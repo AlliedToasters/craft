@@ -70,7 +70,7 @@ class TestPreDispatchDeathWritesRecord:
         # Plan returns one tool call (the death will fire before it dispatches).
         monkeypatch.setattr(
             agent, "chat_with_tools",
-            lambda messages, tools, model: ([_make_tool_call("mine_wood", '{"count": 4}')], None),
+            lambda messages, tools, model: ([_make_tool_call("mine_wood", '{"count": 4}')], None, "", None),
         )
 
         # Death record returned on the pre-dispatch poll.
@@ -105,7 +105,7 @@ class TestPreDispatchDeathWritesRecord:
 
         def fake_chat(*_a, **_kw):
             call_count["n"] += 1
-            return ([_make_tool_call("mine_wood")], None)
+            return ([_make_tool_call("mine_wood")], None, "", None)
 
         monkeypatch.setattr(agent, "chat_with_tools", fake_chat)
         monkeypatch.setattr(agent, "_fetch_new_deaths",
@@ -123,7 +123,7 @@ class TestPreDispatchDeathWritesRecord:
         Pin this so future refactors don't accidentally skip the close."""
         monkeypatch.setattr(
             agent, "chat_with_tools",
-            lambda *_a, **_kw: ([_make_tool_call("mine_wood")], None),
+            lambda *_a, **_kw: ([_make_tool_call("mine_wood")], None, "", None),
         )
         monkeypatch.setattr(agent, "_fetch_new_deaths",
                             lambda since: [{"timestamp": 1, "message": "x",
@@ -144,7 +144,7 @@ class TestPreDispatchDeathWritesRecord:
         ctx_s are 0 because no dispatch happened."""
         monkeypatch.setattr(
             agent, "chat_with_tools",
-            lambda *_a, **_kw: ([_make_tool_call("mine_wood")], None),
+            lambda *_a, **_kw: ([_make_tool_call("mine_wood")], None, "", None),
         )
         monkeypatch.setattr(agent, "_fetch_new_deaths",
                             lambda since: [{"timestamp": 1, "message": "x",
@@ -173,9 +173,9 @@ class TestNoSpuriousRecord:
         no tool call on turn 2 so the loop exits cleanly without a
         permadeath."""
         seq = iter([
-            ([_make_tool_call("mine_wood")], None),  # turn 1: dispatch happens
-            ([], None),                              # turn 2: empty → break
-            ([], None),                              # turn 2 retry (EMPTY_RETRIES=1)
+            ([_make_tool_call("mine_wood")], None, "", None),  # turn 1: dispatch happens
+            ([], None, "", None),                              # turn 2: empty → break
+            ([], None, "", None),                              # turn 2 retry (EMPTY_RETRIES=1)
         ])
         monkeypatch.setattr(agent, "chat_with_tools",
                             lambda *_a, **_kw: next(seq))
