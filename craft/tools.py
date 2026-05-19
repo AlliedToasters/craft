@@ -860,16 +860,25 @@ def _equip() -> dict:
 # stock defaults. Used as the throwaway-items allowlist during shelter builds:
 # anything Equipper might stage into slot 6 should also be something the
 # pathfinder can pillar with, else mid-build material switches trap the agent.
+#
+# Excluded as known-bad: mud (slow-walk physics → Baritone can't reach wall
+# faces in placement budget), basalt + deepslate (pillar/axis-state blocks →
+# Equipper places with wrong orientation). All three produce
+# `failed plates: north=stuck, south=stuck` PARTIAL builds. Characterized at
+# N=250 in 2026-05-19 iters=50 run: rates 9-15% vs ~85% for their non-axis /
+# non-slow-walk siblings (packed_mud, smooth_basalt, cobbled_deepslate). Real
+# rollouts rarely stage these as primary material; treating as known
+# limitation rather than root-fixing Equipper/Baritone.
 _SHELTER_THROWAWAY_ITEMS: tuple[str, ...] = (
     # Baritone stock
     "minecraft:dirt", "minecraft:cobblestone", "minecraft:netherrack", "minecraft:stone",
     # Equipper tier-0 (cheap throwaways)
     "minecraft:coarse_dirt", "minecraft:rooted_dirt", "minecraft:grass_block",
-    "minecraft:podzol", "minecraft:mycelium", "minecraft:mud", "minecraft:packed_mud",
+    "minecraft:podzol", "minecraft:mycelium", "minecraft:packed_mud",
     "minecraft:cobbled_deepslate", "minecraft:blackstone",
     # Equipper tier-1 (cheap stones)
-    "minecraft:deepslate", "minecraft:granite", "minecraft:diorite", "minecraft:andesite",
-    "minecraft:tuff", "minecraft:basalt", "minecraft:smooth_basalt", "minecraft:end_stone",
+    "minecraft:granite", "minecraft:diorite", "minecraft:andesite",
+    "minecraft:tuff", "minecraft:smooth_basalt", "minecraft:end_stone",
     "minecraft:sandstone", "minecraft:red_sandstone", "minecraft:calcite",
     "minecraft:dripstone_block",
 )
