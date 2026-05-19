@@ -802,7 +802,7 @@ def _apply_setup(
 ) -> dict | None:
     """Pre-rollout setup: random TP, time reset, heal, clean inventory.
 
-    Mirrors stress_test_shelter.py's per-iter setup so agent rollouts have
+    Mirrors e2e/stress_test_shelter.py's per-iter setup so agent rollouts have
     the same baseline as substrate stress tests. Skipped entirely when
     start_phase='none' AND random_spawn_range=0 (legacy behavior).
 

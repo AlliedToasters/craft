@@ -29,7 +29,7 @@ The split is the point: LLM reasons over goals; Baritone/Wurst execute. When des
 - `craft/scout.py` — `scan_chunk(dx, dz)` + `describe_chunk` + `describe_neighborhood(radius, fanout_model, unify_model)`. L3-compaction (heightmap + interesting-blocks) shrinks ~90KB raw block payload to ~5KB; below this threshold Qwen3-4B stops "going meta" and produces actual scout reports. TTL chunk-description cache. Env knobs: `CRAFT_SCOUT_FANOUT_MODEL`, `CRAFT_SCOUT_UNIFY_MODEL`, `CRAFT_SCOUT_CACHE_TTL_S`.
 - `craft/tools.py` — tool schemas + dispatch (mine_*, craft, smelt, place, surface, descend, travel, build_shelter, evasion, scan_nearest, collect_smelt, look_around). Env knob: `CRAFT_LOOK_AROUND_MAX_RADIUS` silently clamps requested radius.
 - `craft/agent.py` — closed-loop tool-calling agent. One tool call per turn, `max_turns` cap, per-turn stats injection (`pos=(x,y,z) facing=<cardinal>` ambient).
-- `craft/ambush.py` + `stress_test_shelter.py` — shelter stress harness (block-occupancy breach detector, ≥2 consecutive polls).
+- `craft/ambush.py` + `e2e/stress_test_shelter.py` — shelter stress harness (block-occupancy breach detector, ≥2 consecutive polls).
 
 ## Substrate primitives (operational)
 
@@ -67,7 +67,11 @@ Ten PrismLauncher instances `1.21.4.agent0..9` at `$XDG_DATA_HOME/PrismLauncher/
 
 ## Test suite
 
-`python -m run_tests` (sequential against canonical `:25566`) or `--concurrent` (phased fan-out across agent0..2).
+Two homes:
+- `tests/` — unit tests (pure-Python, ~213 specs, run via `pytest`). No live MC.
+- `e2e/` — integration tests (`test_*.py`, `stress_test_shelter.py`). Live MC + homunculus. Orchestrated by `run_tests.py` as subprocesses (`python -m e2e.<name>`); never imported into the runner. Excluded from pytest via `testpaths` so `pytest` stays offline-safe.
+
+`python -m run_tests` (sequential against canonical `:25566`) or `--concurrent` (phased fan-out across agent0..N).
 
 **Phase-grouped concurrent model**:
 - Tests declare `world_state`: `peaceful` / `non_peaceful` / `mixed`.

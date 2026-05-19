@@ -136,7 +136,7 @@ PHASE_DIFFICULTY: dict[str, str] = {
 TESTS: list[dict] = [
     {
         "name": "mine_wood",
-        "cmd_base": ["uv", "run", "python", "-m", "test_mine_wood", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_mine_wood", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 180,
@@ -147,7 +147,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "evasion",
-        "cmd_base": ["uv", "run", "python", "-m", "test_evasion", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_evasion", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 180,
@@ -166,7 +166,7 @@ TESTS: list[dict] = [
     # Bin-packed: agent0 ~40s, agent1 ~37s, agent2 ~41s.
     {
         "name": "mine_stone",
-        "cmd_base": ["uv", "run", "python", "-m", "test_mine_stone", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_mine_stone", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 120,
@@ -177,7 +177,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "mine_iron",
-        "cmd_base": ["uv", "run", "python", "-m", "test_mine_ore",
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_mine_ore",
                      "--species", "iron", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
@@ -189,7 +189,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "mine_diamond",
-        "cmd_base": ["uv", "run", "python", "-m", "test_mine_ore",
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_mine_ore",
                      "--species", "diamond", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
@@ -201,7 +201,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "mine_coal",
-        "cmd_base": ["uv", "run", "python", "-m", "test_mine_ore",
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_mine_ore",
                      "--species", "coal", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
@@ -213,7 +213,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "surface",
-        "cmd_base": ["uv", "run", "python", "-m", "test_surface", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_surface", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 180,
@@ -224,7 +224,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "descend",
-        "cmd_base": ["uv", "run", "python", "-m", "test_descend", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_descend", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 120,
@@ -235,7 +235,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "travel",
-        "cmd_base": ["uv", "run", "python", "-m", "test_travel", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_travel", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 60,
@@ -246,7 +246,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "place",
-        "cmd_base": ["uv", "run", "python", "-m", "test_place", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_place", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 60,
@@ -257,7 +257,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "craft",
-        "cmd_base": ["uv", "run", "python", "-m", "test_craft", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_craft", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 60,
@@ -268,7 +268,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "smelt",
-        "cmd_base": ["uv", "run", "python", "-m", "test_smelt", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_smelt", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 60,
@@ -279,7 +279,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "collect_smelt",
-        "cmd_base": ["uv", "run", "python", "-m", "test_collect_smelt", "--quiet"],
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_collect_smelt", "--quiet"],
         "threshold": 0.9,
         "iters": 1,
         "timeout_s": 90,
@@ -290,7 +290,7 @@ TESTS: list[dict] = [
     },
     {
         "name": "shelter",
-        "cmd_base": ["uv", "run", "python", "-m", "stress_test_shelter",
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.stress_test_shelter",
                      "--range", "0", "--ambush-seconds", "30"],
         "threshold": 0.66,  # shelter is the flakiest; stress over multiple iters helps
         "iters": 1,

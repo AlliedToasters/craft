@@ -184,7 +184,7 @@ def setup_clean(
         "SUITE_COORDINATOR_MANAGES_DIFFICULTY", "0") == "1"
     if not coord_managed:
         # Standalone-run path: keep legacy global-state cleanup so existing
-        # invocations (python -m test_mine_wood ...) keep working.
+        # invocations (python -m e2e.test_mine_wood ...) keep working.
         set_difficulty("peaceful", server_cmd_base=server_cmd_base)
         c("kill @e[type=!player,type=!item_frame,type=!armor_stand,distance=..64]")
     c(f"effect clear {player_name}")

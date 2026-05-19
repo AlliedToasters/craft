@@ -16,7 +16,7 @@ PASS when:
 Run (against agent0):
   HOMUNCULUS_PORT=25570 MC_PLAYER_NAME=agent0 \\
   MC_SERVER_CMD_BASE=http://10.0.0.222:4747 \\
-  .venv/bin/python test_burrow.py
+  .venv/bin/python -m e2e.test_burrow
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ FAIL if the block lands in the doorway path.
 Run (against agent0):
   HOMUNCULUS_PORT=25570 MC_PLAYER_NAME=agent0 \\
   MC_SERVER_CMD_BASE=http://10.0.0.222:4747 \\
-  .venv/bin/python test_doorway_placement.py
+  .venv/bin/python -m e2e.test_doorway_placement
 """
 
 from __future__ import annotations
