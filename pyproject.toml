@@ -19,3 +19,15 @@ dependencies = [
     "requests>=2.31.0",
     "python-dotenv>=1.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+# Unit tests live under tests/. The bare `test_*.py` files at the repo root
+# are e2e integration tests requiring a live MC client + homunculus —
+# orchestrated by run_tests.py as subprocesses, not pytest. Excluding the
+# repo-root files keeps `pytest` fast and offline-safe.
+testpaths = ["tests"]

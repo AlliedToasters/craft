@@ -297,7 +297,7 @@ TESTS: list[dict] = [
         "timeout_s": 360,
         "summary": "Build shelter, ambush babies for 30s, judge no breach/death.",
         "world_state": "mixed",
-        "concurrent_agents": [0, 1, 2],  # fan-out — 3x iters per --iters
+        "concurrent_agents": [0, 1, 2, 3, 4],  # fan-out — 5x iters per --iters
         # shelter uses `--range` (different flag name); override sequential 0.
         # The leading replacement is intentional — we don't keep the 0 entry.
         "concurrent_extra_args": ["--range", str(CONCURRENT_SPAWN_RANGE)],

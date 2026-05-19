@@ -18,6 +18,7 @@ import requests
 
 from craft.config import PLAYER_NAME as _PLAYER_NAME, SERVER_CMD_BASE as _SERVER_CMD_BASE
 from craft.llm import chat_with_tools, DEFAULT_MODEL
+from craft.milestones import Milestones
 from craft.mine import _yaw_to_direction
 from craft.spawn import random_spawn
 from craft.tools import (
@@ -942,6 +943,12 @@ def run(
     # pre-run deaths in homunculus's ring buffer are ignored.
     last_death_ts = int(time.time() * 1000)
 
+    # Milestone framework — staged goal progression. Predicates evaluated per
+    # turn against stats + inventory. When one fires, its announcement is
+    # appended to the opening (messages[1]) so it persists past the WINDOW
+    # trim and lands in every subsequent prefill.
+    milestones = Milestones()
+
     # Accumulators for the LLM-idle-time post-mortem. Each rollout's plan_s
     # total is the answer to "how long was the harness standing around
     # waiting for the model?" — useful for A/B comparing models or context
@@ -959,6 +966,7 @@ def run(
 
     for turn in range(1, max_turns + 1):
         turn_start = time.perf_counter()
+        milestone_event = None
         print(f"\n=== turn {turn}/{max_turns}: planning ===")
         plan_start = time.perf_counter()
         tool_calls, content = chat_with_tools(messages, TOOLS, model=model)
@@ -1024,6 +1032,28 @@ def run(
             print(f"[death] {preamble} (during planning — skipping dispatch)")
             turn_dt = time.perf_counter() - turn_start
             print(f"[timing] turn {turn} aborted post-plan: total={turn_dt:.1f}s")
+            # Synthetic JSONL record so post-hoc analyzers see the terminating
+            # death. Skipping it under-counts permadeaths (issue #1). Fields
+            # mirror the normal turn record but with no dispatch outcome and
+            # exec/ctx zeroed; stats/inventory omitted (player has already
+            # respawned by now, so live reads would be misleading).
+            if jsonl_fh is not None:
+                jsonl_fh.write(json.dumps({
+                    "_type": "turn",
+                    "turn": turn,
+                    "tool": name,
+                    "args": args,
+                    "outcome": "aborted_pre_dispatch_due_to_death",
+                    "plan_s": round(plan_dt, 3),
+                    "exec_s": 0.0,
+                    "ctx_s": 0.0,
+                    "total_s": round(turn_dt, 3),
+                    "health": 0,
+                    "died": True,
+                    "death": d,
+                }) + "\n")
+                jsonl_fh.flush()
+            print(f"\n=== PERMADEATH: trajectory terminated at turn {turn} ===")
             break
 
         exec_start = time.perf_counter()
@@ -1152,6 +1182,22 @@ def run(
             }
         )
 
+        # Milestone check — predicates over stats + inventory. Fires at most
+        # once per milestone per rollout. The announcement is appended to the
+        # opening so it survives the window trim and becomes part of every
+        # subsequent prefill (no system-prompt mutation → kv-cache friendly).
+        # Pass the compact {item_id: count} shape that the backtest validated
+        # against, not the raw homunculus {main: [...], offhand: {...}} shape.
+        milestone_event = milestones.check(
+            stats_raw, _inventory_compact(inv_raw), turn
+        )
+        if milestone_event:
+            print(f"[milestone] {milestone_event.name} fired at turn {turn}")
+            messages[1] = {
+                **messages[1],
+                "content": messages[1]["content"] + "\n\n" + milestone_event.message,
+            }
+
         # Trim older turns to keep prefill cost bounded. Each turn appends
         # exactly 2 messages, so messages[2:] grows by 2 per turn. We keep
         # messages[:2] (system + opening) and the most-recent 2*WINDOW_TURNS
@@ -1203,6 +1249,8 @@ def run(
                     "dry_land_pos": water_aversion_status.get("dry_land_pos"),
                     "flee_state": water_aversion_status.get("flee_state"),
                 }
+            if milestone_event:
+                rec["milestone_fired"] = milestone_event.name
             if died_this_turn and new_deaths:
                 rec["death"] = new_deaths[-1]
             jsonl_fh.write(json.dumps(rec) + "\n")
