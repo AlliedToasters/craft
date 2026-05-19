@@ -9,6 +9,10 @@ Behavior per attempt: pick (dx, dz) ∈ [-range, range]^2, /tp the player
 to (anchor.x + dx, drop_y, anchor.z + dz) in creative, wait for
 on_ground, then reject if any of:
   - stuck_no_ground   (TP'd inside terrain; suffocation risk)
+  - column_inverted   (landed too high — terrain extended above drop_y;
+                       agent clipped onto a peak or encased mid-block)
+  - cave_fall         (fell too far below drop_y — column had an open
+                       cave pocket; agent dropped into a deep cave)
   - in_water          (typically ocean; rollout wood-starves)
   - in_lava           (immediate death)
   - bad biome         (BAD_BIOMES — empirically unsurvivable)
@@ -52,6 +56,42 @@ BAD_BIOMES: tuple[str, ...] = (
 )
 
 
+def _classify_landing(
+    landing_y: int,
+    drop_y: int,
+    *,
+    inverted_margin: int = 5,
+    cave_fall_max: int = 50,
+) -> Optional[str]:
+    """Reject landings that signal a bad column (encased peak or cave pocket).
+
+    The current spawn-retry loop catches water/lava/biome but is blind to
+    column shape:
+      - High terrain above drop_y → agent clips onto a peak. on_ground=true
+        but the spawn is effectively encased mid-block; build_shelter
+        aborts downstream with `encased=true`.
+      - Open column with a cave pocket → agent falls *through* the natural
+        surface into a cave. on_ground=true, biome valid, but surface() now
+        has to ascend 9-20 blocks of stone (Baritone vertical-mine timeout).
+
+    Returns a string reason (used as the `attempts[].reason` audit code) if
+    the landing should be rejected, else None.
+
+    Thresholds: with drop_y=100, defaults reject landing_y>=95 (inverted)
+    and landing_y<50 (cave-fall). The 50-block cave-fall threshold leaves
+    normal plains (y≈64) and forest (y≈70) alone while catching the
+    observed-failure landings (y=44/50/55/59 in deep caves below
+    y=70-79 surfaces). Tunable per call. Doesn't catch all cave-fall
+    cases — a column-scan for the natural surface would, but that needs
+    a homunculus API we don't have yet.
+    """
+    if landing_y >= drop_y - inverted_margin:
+        return f"column_inverted(y={landing_y})"
+    if drop_y - landing_y > cave_fall_max:
+        return f"cave_fall(y={landing_y})"
+    return None
+
+
 def _server_cmd(server_cmd_base: str, cmd: str, *, timeout: float = 5.0) -> dict:
     try:
         r = requests.post(
@@ -74,6 +114,16 @@ def _stats(homunculus_base: str) -> Optional[dict]:
         return None
 
 
+def _position(homunculus_base: str) -> Optional[dict]:
+    """Read /position for landing_y. /stats does not include y."""
+    try:
+        r = requests.get(f"{homunculus_base}/position", timeout=5.0)
+        r.raise_for_status()
+        return r.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
 def random_spawn(
     *,
     range_blocks: int,
@@ -83,6 +133,8 @@ def random_spawn(
     drop_y: int = 100,
     max_retries: int = 8,
     bad_biomes: tuple[str, ...] = BAD_BIOMES,
+    column_inverted_margin: int = 5,
+    column_cave_fall_max: int = 50,
     anchor_xz: Optional[tuple[int, int]] = None,
     rng: Optional[_random.Random] = None,
     verbose: bool = True,
@@ -142,6 +194,20 @@ def random_spawn(
                 break
         if not landed:
             return False, "stuck_no_ground"
+        # Column-quality check: /stats omits coords, so read /position for y.
+        # Catches both encased-on-peak (landing_y≈drop_y) and cave-fall
+        # (landing_y << drop_y) which the existing checks miss.
+        pos = _position(homunculus_base) or {}
+        ly_raw = pos.get("y")
+        if ly_raw is not None:
+            landing_y = int(math.floor(float(ly_raw)))
+            reason = _classify_landing(
+                landing_y, drop_y,
+                inverted_margin=column_inverted_margin,
+                cave_fall_max=column_cave_fall_max,
+            )
+            if reason is not None:
+                return False, reason
         s = _stats(homunculus_base) or {}
         if s.get("in_water"):
             return False, "in_water"
