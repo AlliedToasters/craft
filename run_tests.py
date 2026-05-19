@@ -28,15 +28,71 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import requests
 
 from craft.config import SERVER_CMD_BASE
+
+
+def _wilson_ci(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson 95% CI for a binomial proportion (default z=1.96 → 95%).
+
+    Pure-Python implementation — kept here because the suite is the only
+    consumer and pulling scipy/statsmodels into the dep set is overkill
+    for a 4-line formula.
+
+    Edge cases: n=0 → (0.0, 1.0) (no information). passed=0 / passed=n
+    gives an asymmetric CI bounded at 0 / 1 respectively, which is the
+    correct Wilson behavior (unlike the naïve normal approximation
+    which would produce nonsense intervals at the extremes).
+    """
+    if n <= 0:
+        return 0.0, 1.0
+    p_hat = passed / n
+    denom = 1.0 + (z * z) / n
+    center = (p_hat + (z * z) / (2 * n)) / denom
+    margin = (z / denom) * math.sqrt(
+        (p_hat * (1 - p_hat) / n) + (z * z) / (4 * n * n)
+    )
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+# Numbers / coords / paths in fail-reason strings vary per iter and make
+# the histogram useless if not normalized. Strip them out so semantically
+# equivalent failures group together.
+_REASON_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_REASON_COORD_RE = re.compile(r"\(\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\)")
+_REASON_ITER_PREFIX_RE = re.compile(r"^iter \d+:\s*")
+
+
+def _normalize_reason(reason: str) -> str:
+    """Bucket fail reasons so the histogram groups semantically equivalent
+    failures. Strips the leading 'iter N:' prefix, coord tuples, and bare
+    numbers — these vary per-iter and noise the count.
+    """
+    if not reason:
+        return "unknown"
+    s = _REASON_ITER_PREFIX_RE.sub("", reason)
+    s = _REASON_COORD_RE.sub("(x,y,z)", s)
+    s = _REASON_NUMBER_RE.sub("N", s)
+    # Truncate so very long timeout-trace strings don't dominate the table.
+    return s[:120]
+
+
+def _fail_histogram(fail_reasons: list[str]) -> list[tuple[str, int]]:
+    """Group fail reasons by normalized signature, sort by count desc."""
+    c: Counter = Counter()
+    for r in fail_reasons:
+        c[_normalize_reason(r)] += 1
+    return c.most_common()
 
 
 def _preflight(base: str) -> str | None:
@@ -88,14 +144,19 @@ def _judge_pass_rate(path: Path, threshold: float) -> tuple[bool, str, dict]:
             reason = r.get("fail_reason") or r.get("fatal_error") or "unknown"
             fail_reasons.append(f"iter {i}: {reason}")
     ok = rate >= threshold
+    ci_lo, ci_hi = _wilson_ci(passed, n)
     details = {
         "iters": n,
         "passed": passed,
         "rate": round(rate, 3),
+        "ci_lo": round(ci_lo, 3),
+        "ci_hi": round(ci_hi, 3),
         "threshold": threshold,
         "fail_reasons": fail_reasons,
     }
-    summary = (f"{passed}/{n} passed (rate={rate:.2f}, threshold={threshold:.2f})"
+    summary = (f"{passed}/{n} passed "
+               f"(rate={rate:.2f} [{ci_lo:.2f},{ci_hi:.2f}], "
+               f"threshold={threshold:.2f})"
                + (f" — {'; '.join(fail_reasons[:3])}"
                   + (f" (+{len(fail_reasons) - 3} more)" if len(fail_reasons) > 3 else "")
                   if fail_reasons else ""))
@@ -403,16 +464,20 @@ def _judge_combined(name: str, threshold: float
             reason = r.get("fail_reason") or r.get("fatal_error") or "unknown"
             fail_reasons.append(f"iter {i}: {reason}")
     ok = rate >= threshold
+    ci_lo, ci_hi = _wilson_ci(passed, n)
     details = {
         "iters": n,
         "passed": passed,
         "rate": round(rate, 3),
+        "ci_lo": round(ci_lo, 3),
+        "ci_hi": round(ci_hi, 3),
         "threshold": threshold,
         "fail_reasons": fail_reasons,
         "agent_count": len(candidates),
     }
     summary = (f"{passed}/{n} passed across {len(candidates)} agent(s) "
-               f"(rate={rate:.2f}, threshold={threshold:.2f})"
+               f"(rate={rate:.2f} [{ci_lo:.2f},{ci_hi:.2f}], "
+               f"threshold={threshold:.2f})"
                + (f" — {'; '.join(fail_reasons[:3])}"
                   + (f" (+{len(fail_reasons) - 3} more)"
                      if len(fail_reasons) > 3 else "")
@@ -806,14 +871,38 @@ def main(argv: list[str] | None = None) -> int:
     for r in results:
         tag = "PASS" if r["passed"] else "FAIL"
         d = r["details"]
-        rate_str = (f"{d.get('passed', 0)}/{d.get('iters', 0)} "
-                    f"({d.get('rate', 0.0):.2f})") if d.get("iters") else "n/a"
+        if d.get("iters"):
+            rate_str = (f"{d.get('passed', 0)}/{d.get('iters', 0)} "
+                        f"({d.get('rate', 0.0):.2f} "
+                        f"[{d.get('ci_lo', 0.0):.2f},"
+                        f"{d.get('ci_hi', 1.0):.2f}])")
+        else:
+            rate_str = "n/a"
         print(f"  {tag}  {r['name']:<{width_name}}  {r['wall_s']:>6.1f}s  "
               f"rate={rate_str}  {r['summary']}", flush=True)
     total_wall = sum(r["wall_s"] for r in results)
     failed = [r for r in results if not r["passed"]]
     print(f"\n[suite] {len(results) - len(failed)}/{len(results)} tests passed "
           f"({total_wall:.1f}s total)", flush=True)
+
+    # Failure-mode histogram across all specs with any failures. Useful
+    # at higher --iters where flake-rate characterization is the goal.
+    flaky = [r for r in results
+             if r["details"].get("fail_reasons")]
+    if flaky:
+        print(f"\n{'=' * 78}\n[suite] FAILURE MODES (grouped)\n{'=' * 78}",
+              flush=True)
+        for r in flaky:
+            reasons = r["details"]["fail_reasons"]
+            hist = _fail_histogram(reasons)
+            d = r["details"]
+            print(f"  {r['name']} — {len(reasons)}/{d.get('iters', 0)} failed:",
+                  flush=True)
+            for sig, count in hist[:5]:
+                print(f"    {count:>3}× {sig}", flush=True)
+            if len(hist) > 5:
+                print(f"    ... (+{len(hist) - 5} more signature(s))",
+                      flush=True)
     return 0 if not failed else 1
 
 

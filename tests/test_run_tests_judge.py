@@ -31,7 +31,13 @@ from pathlib import Path
 
 import pytest
 
-from run_tests import _judge_combined, _judge_pass_rate
+from run_tests import (
+    _fail_histogram,
+    _judge_combined,
+    _judge_pass_rate,
+    _normalize_reason,
+    _wilson_ci,
+)
 
 
 # ---------------------------------------------- helpers
@@ -445,3 +451,124 @@ class TestJudgeCombinedSummaryFormat:
         assert "r1" in summary and "r2" in summary and "r3" in summary
         assert "r4" not in summary
         assert "(+2 more)" in summary
+
+
+# ---------------------------------------------- Wilson CI
+
+
+class TestWilsonCI:
+    """Wilson 95% CI for binomial proportion. The whole point of the CI
+    is that adjacent runs at small N have wildly different intervals,
+    and the suite report needs to surface that."""
+
+    def test_zero_iters_returns_uninformative(self):
+        # No data → the interval is the whole [0, 1] range. Caller can
+        # then decide that "n/a" is the right thing to display.
+        lo, hi = _wilson_ci(0, 0)
+        assert lo == 0.0 and hi == 1.0
+
+    def test_perfect_pass_at_small_n(self):
+        # 5/5 — the upper bound hits 1.0 (asymmetric CI). Lower is
+        # nontrivial — Wilson is more honest here than naïve [1.0, 1.0].
+        lo, hi = _wilson_ci(5, 5)
+        assert hi == pytest.approx(1.0, abs=0.05)
+        assert lo < 0.7  # 5/5 doesn't prove >70% pass rate
+
+    def test_perfect_fail_at_small_n(self):
+        lo, hi = _wilson_ci(0, 5)
+        assert lo == pytest.approx(0.0, abs=0.05)
+        assert hi > 0.3  # 0/5 doesn't prove <30% pass rate either
+
+    def test_50_percent_is_symmetric(self):
+        lo, hi = _wilson_ci(5, 10)
+        # Center should be ~0.5; width should be wide at N=10.
+        assert 0.5 - lo == pytest.approx(hi - 0.5, abs=0.01)
+        assert (hi - lo) > 0.5  # CI is huge — N=10 says basically nothing
+
+    def test_interval_tightens_with_n(self):
+        # Same rate, increasing N → tighter interval.
+        lo10, hi10 = _wilson_ci(9, 10)
+        lo100, hi100 = _wilson_ci(90, 100)
+        assert (hi10 - lo10) > (hi100 - lo100)
+
+    def test_known_value(self):
+        # Pinned against a reference value to catch formula drift.
+        # 23/25 at z=1.96 → ~[0.748, 0.978] per standard Wilson.
+        lo, hi = _wilson_ci(23, 25)
+        assert lo == pytest.approx(0.749, abs=0.005)
+        assert hi == pytest.approx(0.977, abs=0.005)
+
+    def test_n_larger_than_passed_is_handled(self):
+        # No-op safety: passed <= n is the contract; the formula doesn't
+        # validate this. Caller must.
+        lo, hi = _wilson_ci(0, 1)
+        assert 0.0 <= lo <= hi <= 1.0
+
+
+# ---------------------------------------------- fail-reason histogram
+
+
+class TestNormalizeReason:
+    """Failure reasons must group across iters. The numbers and coord
+    tuples that vary per-iter are the noise; the structural signature
+    is the signal."""
+
+    def test_strips_iter_prefix(self):
+        out = _normalize_reason("iter 3: agent fell into cave")
+        assert out == "agent fell into cave"
+
+    def test_strips_coords(self):
+        a = _normalize_reason("iter 1: encased at (5, 100, -3)")
+        b = _normalize_reason("iter 2: encased at (12, 100, 47)")
+        assert a == b
+        assert "(x,y,z)" in a
+
+    def test_strips_numbers(self):
+        # Two timeouts with different recorded delays bucket together.
+        a = _normalize_reason("timeout after 42.3s")
+        b = _normalize_reason("timeout after 51.1s")
+        assert a == b
+
+    def test_empty_reason_is_unknown(self):
+        assert _normalize_reason("") == "unknown"
+
+    def test_truncates_long_reasons(self):
+        long = "X" * 500
+        out = _normalize_reason(long)
+        assert len(out) <= 120
+
+
+class TestFailHistogram:
+    """Counter groups by normalized signature, sorted by count desc."""
+
+    def test_empty_input(self):
+        assert _fail_histogram([]) == []
+
+    def test_groups_iter_specific_noise(self):
+        # Three "same" failure modes; histogram should report count=3.
+        hist = _fail_histogram([
+            "iter 1: encased at (1, 100, 2)",
+            "iter 2: encased at (3, 100, 4)",
+            "iter 5: encased at (10, 100, 99)",
+        ])
+        assert len(hist) == 1
+        assert hist[0][1] == 3
+        assert "encased" in hist[0][0]
+
+    def test_distinct_signatures_split(self):
+        hist = _fail_histogram([
+            "iter 1: encased at (1, 100, 2)",
+            "iter 2: encased at (3, 100, 4)",
+            "iter 3: timeout after 42s",
+        ])
+        assert len(hist) == 2
+        counts = sorted(c for _, c in hist)
+        assert counts == [1, 2]
+
+    def test_sort_order_count_desc(self):
+        hist = _fail_histogram(
+            ["A"] * 5 + ["B"] * 2 + ["C"] * 1
+        )
+        # _normalize_reason("A") -> "A" etc., so signatures stay distinct.
+        assert hist[0][1] >= hist[1][1] >= hist[2][1]
+        assert hist[0][1] == 5
