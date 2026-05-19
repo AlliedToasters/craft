@@ -288,6 +288,32 @@ TESTS: list[dict] = [
         "concurrent_agents": [0],
         "concurrent_extra_args": ["--spawn-range", str(CONCURRENT_SPAWN_RANGE)],
     },
+    # burrow + doorway_placement use fixed-coord arenas (5000,100,5000)
+    # rather than spawn-scattered ones — multiple agents on the same arena
+    # would clobber each other. Each lives on a single agent (no fan-out)
+    # and skips --spawn-range.
+    {
+        "name": "burrow",
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_burrow", "--quiet"],
+        "threshold": 0.9,
+        "iters": 1,
+        "timeout_s": 90,
+        "summary": "Fixed-arena tunneling: handle_burrow excavates 3 cells + seals + ends in back cavity.",
+        "world_state": "peaceful",
+        "concurrent_agents": [0],
+        "concurrent_extra_args": [],
+    },
+    {
+        "name": "doorway_placement",
+        "cmd_base": ["uv", "run", "python", "-m", "e2e.test_doorway_placement", "--quiet"],
+        "threshold": 0.9,
+        "iters": 1,
+        "timeout_s": 60,
+        "summary": "Fixed-arena door + /place: verify block doesn't land in doorway footprint (or guard refuses).",
+        "world_state": "peaceful",
+        "concurrent_agents": [0],
+        "concurrent_extra_args": [],
+    },
     {
         "name": "shelter",
         "cmd_base": ["uv", "run", "python", "-m", "e2e.stress_test_shelter",

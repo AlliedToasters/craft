@@ -25,12 +25,14 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 import requests
 
 from craft.testkit import (
     HOMUNCULUS_BASE,
     PLAYER_NAME,
+    TestLogger,
     cmd,
     pos,
     set_gamemode,
@@ -79,7 +81,7 @@ def _doorway_cells() -> set[tuple[int, int, int]]:
     }
 
 
-def run_iter(verbose: bool = True) -> dict:
+def run_iter(rec: dict, verbose: bool = True) -> None:
     # TP the player first so the destination chunks load; only then do
     # /fill operations actually touch blocks. /fill on an unloaded chunk
     # silently no-ops.
@@ -103,8 +105,9 @@ def run_iter(verbose: bool = True) -> dict:
             on_ground = True
             break
     if not on_ground:
-        return {"passed": False,
-                "fail_reason": f"player did not land on platform pos={pos()}"}
+        rec["passed"] = False
+        rec["fail_reason"] = f"player did not land on platform pos={pos()}"
+        return
     set_gamemode("survival")
     cmd(f"clear {PLAYER_NAME}")
     cmd(f"give {PLAYER_NAME} crafting_table 1")
@@ -112,20 +115,21 @@ def run_iter(verbose: bool = True) -> dict:
 
     p = pos()
     if p is None:
-        return {"passed": False, "fail_reason": "could_not_read_position"}
+        rec["passed"] = False
+        rec["fail_reason"] = "could_not_read_position"
+        return
     if abs(p[0] - ARENA_X) > 2 or abs(p[2] - ARENA_Z) > 2:
-        return {"passed": False,
-                "fail_reason": f"player_not_at_center pos={p}"}
+        rec["passed"] = False
+        rec["fail_reason"] = f"player_not_at_center pos={p}"
+        return
 
     resp = place_block("minecraft:crafting_table")
     if verbose:
         print(f"[place] response: {json.dumps(resp)}")
 
-    rec: dict = {
-        "player_pos": list(p),
-        "door_pos": [ARENA_X, ARENA_Y, ARENA_Z + DOOR_DZ],
-        "place_response": resp,
-    }
+    rec["player_pos"] = list(p)
+    rec["door_pos"] = [ARENA_X, ARENA_Y, ARENA_Z + DOOR_DZ]
+    rec["place_response"] = resp
 
     if resp.get("success"):
         placed_at = tuple(resp["placed_at"])
@@ -137,7 +141,7 @@ def run_iter(verbose: bool = True) -> dict:
             if in_doorway else None
         )
         rec["in_doorway"] = in_doorway
-        return rec
+        return
 
     # Place failed. If the guard refused with blocks_doorway, that's the
     # post-fix expected behavior — PASS. Any other reason is unclear
@@ -151,7 +155,6 @@ def run_iter(verbose: bool = True) -> dict:
     else:
         rec["passed"] = False
         rec["fail_reason"] = f"place_failed reason={reason}"
-    return rec
 
 
 def main() -> int:
@@ -160,16 +163,24 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--keep-arena", action="store_true",
                     help="skip teardown (useful for inspecting in-game)")
+    ap.add_argument("--pass-rate", type=float, default=1.0)
+    ap.add_argument("--out", default=None,
+                    help="JSONL output path (default: derived from test name)")
     args = ap.parse_args()
 
     verbose = not args.quiet
-    results: list[dict] = []
+    logger = TestLogger("doorway_placement",
+                        path=Path(args.out) if args.out else None)
     try:
         for i in range(args.iters):
             print(f"\n=== iter {i + 1}/{args.iters} (player={PLAYER_NAME}, "
                   f"homunculus={HOMUNCULUS_BASE}) ===")
-            rec = run_iter(verbose=verbose)
-            results.append(rec)
+            try:
+                with logger.iter_record(i) as rec:
+                    run_iter(rec, verbose=verbose)
+            except Exception as e:
+                print(f"[test] iter {i} raised: {e!r}", flush=True)
+                continue
             tag = "PASS" if rec.get("passed") else "FAIL"
             reason = rec.get("fail_reason") or "ok"
             print(f"[{tag}] iter {i + 1}: {reason}")
@@ -177,9 +188,9 @@ def main() -> int:
         if not args.keep_arena:
             teardown_arena()
 
-    n_pass = sum(1 for r in results if r.get("passed"))
-    print(f"\n{n_pass}/{len(results)} passed")
-    return 0 if n_pass == len(results) else 1
+    summary = logger.summary()
+    print(json.dumps(summary, indent=2), flush=True)
+    return 0 if summary["rate"] >= args.pass_rate else 1
 
 
 if __name__ == "__main__":

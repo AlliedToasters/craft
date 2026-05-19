@@ -89,10 +89,11 @@ Two homes:
 
 **Per-agent serialization (2026-05-16)**: multiple tests targeting the same agent within a phase queue and run sequentially. Across agents they advance in parallel. `_launch_phase` builds the queues; `_launch_one` is the spawn helper.
 
-**Wired (14 specs, one per agent tool)**:
-- **Peaceful (12)**: mine_wood (agent0), mine_stone/iron/diamond/coal (agent2), surface/travel/place/craft/smelt (agent1), descend/collect_smelt (agent0).
+**Wired (16 specs)**:
+- **Peaceful (14)**: mine_wood (agent0), mine_stone/iron/diamond/coal (agent2), surface/travel/place/craft/smelt (agent1), descend/collect_smelt/burrow/doorway_placement (agent0).
 - **Non-peaceful (1)**: evasion (agent1).
-- **Mixed (1)**: shelter × 3 fan-out (agents 0/1/2).
+- **Mixed (1)**: shelter × 5 fan-out (agents 0..4).
+- **Fixed-arena (no fan-out)**: burrow, doorway_placement — both use coord (5000,100,5000), single-agent only.
 
 **Smoke 2026-05-16**: 13/13 PASS (peaceful + non_peaceful) in 365s. shelter runs separately.
 

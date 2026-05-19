@@ -25,12 +25,14 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 import requests
 
 from craft.testkit import (
     HOMUNCULUS_BASE,
     PLAYER_NAME,
+    TestLogger,
     cmd,
     pos,
     set_gamemode,
@@ -124,7 +126,7 @@ def _block_at(scan: dict, x: int, y: int, z: int) -> str | None:
     return None
 
 
-def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
+def run_iter(rec: dict, verbose: bool = True, with_expand: bool = False) -> None:
     clear_burrow_state()
 
     # Load chunks first by TPing above the destination, then fill, then TP
@@ -136,7 +138,9 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
     time.sleep(0.8)
     arena_ok, arena_reason = _verify_arena()
     if not arena_ok:
-        return {"passed": False, "fail_reason": f"arena_build_failed: {arena_reason}"}
+        rec["passed"] = False
+        rec["fail_reason"] = f"arena_build_failed: {arena_reason}"
+        return
     cmd(f"tp {PLAYER_NAME} {ARENA_X}.5 {ARENA_Y} {ARENA_Z}.5 -90 0")
     landed = False
     for _ in range(20):
@@ -150,8 +154,9 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
             landed = True
             break
     if not landed:
-        return {"passed": False,
-                "fail_reason": f"player did not land on platform pos={pos()}"}
+        rec["passed"] = False
+        rec["fail_reason"] = f"player did not land on platform pos={pos()}"
+        return
     set_gamemode("survival")
     cmd(f"clear {PLAYER_NAME}")
     # Seed with 6 cobble so the seal works even if tunnel drops are flaky.
@@ -164,21 +169,21 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
 
     p = pos()
     if p is None:
-        return {"passed": False, "fail_reason": "could_not_read_position"}
+        rec["passed"] = False
+        rec["fail_reason"] = "could_not_read_position"
+        return
 
     result_str = handle_burrow({})
     if verbose:
         print(f"[burrow] result: {result_str}")
 
-    rec: dict = {
-        "player_pos_before": list(p),
-        "burrow_result": result_str,
-    }
+    rec["player_pos_before"] = list(p)
+    rec["burrow_result"] = result_str
 
     if result_str.startswith("FAILED") or result_str.startswith("PARTIAL"):
         rec["passed"] = False
         rec["fail_reason"] = f"handle_burrow non-success: {result_str}"
-        return rec
+        return
 
     # Verify geometry. Scan the entire corridor + seal + back cavity.
     time.sleep(0.5)
@@ -186,7 +191,7 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
     if scan.get("success") is False:
         rec["passed"] = False
         rec["fail_reason"] = f"verification scan failed: {scan.get('reason')}"
-        return rec
+        return
 
     foyer_air = (_is_air(scan, ARENA_X + 1, ARENA_Y, ARENA_Z)
                  and _is_air(scan, ARENA_X + 1, ARENA_Y + 1, ARENA_Z))
@@ -230,7 +235,7 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
     rec["fail_reason"] = "; ".join(failures) if failures else None
 
     if not rec["passed"] or not with_expand:
-        return rec
+        return
 
     # ── expand_burrow phase ────────────────────────────────────────────
     # Burrow PASS → call expand_burrow, verify the 2×3 alcove cells are
@@ -243,7 +248,7 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
     if expand_str.startswith("FAILED") or expand_str.startswith("PARTIAL"):
         rec["passed"] = False
         rec["fail_reason"] = f"handle_expand_burrow non-success: {expand_str}"
-        return rec
+        return
 
     # Alcove (facing east) spans x=[5004,5005], z=[4999,5001], y=[100,101].
     # Sample interior, ceiling, floor, seal.
@@ -253,7 +258,7 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
     if scan2.get("success") is False:
         rec["passed"] = False
         rec["fail_reason"] = f"post-expand scan failed: {scan2.get('reason')}"
-        return rec
+        return
 
     alcove_cells = [
         (ARENA_X + 4, ARENA_Y, ARENA_Z - 1),
@@ -296,7 +301,6 @@ def run_iter(verbose: bool = True, with_expand: bool = False) -> dict:
     rec["expand_burrow_state"] = bstate2
     rec["passed"] = len(failures2) == 0
     rec["fail_reason"] = "; ".join(failures2) if failures2 else None
-    return rec
 
 
 def main() -> int:
@@ -307,16 +311,24 @@ def main() -> int:
                     help="skip teardown (useful for in-game inspection)")
     ap.add_argument("--with-expand", action="store_true",
                     help="chain expand_burrow after burrow and verify alcove")
+    ap.add_argument("--pass-rate", type=float, default=1.0)
+    ap.add_argument("--out", default=None,
+                    help="JSONL output path (default: derived from test name)")
     args = ap.parse_args()
 
     verbose = not args.quiet
-    results: list[dict] = []
+    logger = TestLogger("burrow",
+                        path=Path(args.out) if args.out else None)
     try:
         for i in range(args.iters):
             print(f"\n=== iter {i + 1}/{args.iters} (player={PLAYER_NAME}, "
                   f"homunculus={HOMUNCULUS_BASE}) ===")
-            rec = run_iter(verbose=verbose, with_expand=args.with_expand)
-            results.append(rec)
+            try:
+                with logger.iter_record(i) as rec:
+                    run_iter(rec, verbose=verbose, with_expand=args.with_expand)
+            except Exception as e:
+                print(f"[test] iter {i} raised: {e!r}", flush=True)
+                continue
             tag = "PASS" if rec.get("passed") else "FAIL"
             reason = rec.get("fail_reason") or "ok"
             print(f"[{tag}] iter {i + 1}: {reason}")
@@ -329,9 +341,9 @@ def main() -> int:
             _teardown_arena()
             clear_burrow_state()
 
-    n_pass = sum(1 for r in results if r.get("passed"))
-    print(f"\n{n_pass}/{len(results)} passed")
-    return 0 if n_pass == len(results) else 1
+    summary = logger.summary()
+    print(json.dumps(summary, indent=2), flush=True)
+    return 0 if summary["rate"] >= args.pass_rate else 1
 
 
 if __name__ == "__main__":
