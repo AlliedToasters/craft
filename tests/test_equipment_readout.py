@@ -262,6 +262,24 @@ class TestArmorGating:
         assert "helmet: none — iron_helmet craftable" in body
         assert "leather_helmet" not in body
 
+    def test_same_tier_material_does_not_re_nudge_equipped_slot(self):
+        # The 2026-05-20 duplicate-craft regression scenario: agent1-r88 wore
+        # iron_helmet AND held 5 iron_ingots — recipe fits exactly → 3 redundant
+        # helmet crafts. The readout must NOT contribute to that pull; equipped
+        # iron_helmet + spare iron material yields the equipped line ONLY for
+        # the helmet slot (other slots get the iron-tier hint, fine).
+        inv = _mk(
+            head="minecraft:iron_helmet",
+            main=["minecraft:iron_ingot"] * 5,
+        )
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: iron_helmet" in body
+        # No re-nudge for the slot that's already filled.
+        assert "iron_helmet craftable" not in body
+        assert "none — iron_helmet" not in body
+        # Other slots still get the hint (the agent SHOULD craft chestplate next).
+        assert "chestplate: none — iron_chestplate craftable" in body
+
     def test_equipped_armor_overrides_hint(self):
         # Wearing leather_helmet AND has iron — readout shows what's worn,
         # not a hint to upgrade. (Upgrade is the model's job to spot.)
