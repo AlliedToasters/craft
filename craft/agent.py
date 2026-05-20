@@ -618,6 +618,19 @@ _ARMOR_SLOTS: tuple[tuple[str, str], ...] = (
     ("leggings",   "leggings"),
     ("boots",      "boots"),
 )
+# Materials that prove an armor tier is craftable, best-tier-first. A vacant
+# armor slot only gets a line when at least one of these is in inventory —
+# otherwise the readout suggests an action the agent can't take. Without this
+# gating, qwen confabulates `wooden_helmet` (no such recipe) in a tight loop
+# (validated 2026-05-20 replay: 5/5 → wooden_helmet without gating, 0/5 with).
+_ARMOR_MATERIAL_PROBES: tuple[tuple[str, str], ...] = (
+    # (material name, registry id whose presence proves the tier is craftable)
+    ("netherite", "minecraft:netherite_ingot"),
+    ("diamond",   "minecraft:diamond"),
+    ("iron",      "minecraft:iron_ingot"),
+    ("golden",    "minecraft:gold_ingot"),
+    ("leather",   "minecraft:leather"),
+)
 
 
 def _all_item_ids(inv: dict | None) -> set[str]:
@@ -646,8 +659,24 @@ def _best_tier_id(ids: set[str], suffix: str, tier_order: tuple[str, ...]) -> st
     return None
 
 
+def _best_craftable_armor_material(ids: set[str]) -> str | None:
+    """First (best-tier) material from _ARMOR_MATERIAL_PROBES present in `ids`."""
+    for material, probe_id in _ARMOR_MATERIAL_PROBES:
+        if probe_id in ids:
+            return material
+    return None
+
+
 def _render_equipment(inv: dict | None) -> list[str]:
-    """Per-slot best-of-class equipment block for the STATE readout."""
+    """Per-slot best-of-class equipment block for the STATE readout.
+
+    Tool slots always render (vacant phrase + nudge), since wood-tier exists
+    for every tool and `craft(wooden_<tool>)` is a valid recipe from logs.
+    Armor slots only render when (a) equipped, or (b) materials are present
+    to craft a real tier; otherwise the line is omitted to avoid nagging the
+    agent into hallucinating `wooden_helmet` (no such recipe). The global
+    `armor=N` in the Stats line remains as the under-armored signal.
+    """
     lines = ["Equipment:"]
     ids = _all_item_ids(inv)
     for label, suffix, vacant in _TOOL_SLOTS:
@@ -656,12 +685,14 @@ def _render_equipment(inv: dict | None) -> list[str]:
             lines.append(f"  {label}: {best.split(':', 1)[-1]}")
         else:
             lines.append(f"  {label}: {vacant} (no {suffix} crafted yet)")
+    material = _best_craftable_armor_material(ids)
     for label, suffix in _ARMOR_SLOTS:
         best = _best_tier_id(ids, suffix, _ARMOR_TIERS)
         if best:
             lines.append(f"  {label}: {best.split(':', 1)[-1]}")
-        else:
-            lines.append(f"  {label}: you have no {label}! (no {label} crafted yet)")
+        elif material is not None:
+            lines.append(f"  {label}: none — {material}_{suffix} craftable")
+        # else: omit the line entirely
     return lines
 
 

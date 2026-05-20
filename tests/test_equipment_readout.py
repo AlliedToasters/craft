@@ -16,6 +16,7 @@ import pytest
 
 from craft.agent import (
     _all_item_ids,
+    _best_craftable_armor_material,
     _best_tier_id,
     _equipment_readout_enabled,
     _format_inventory,
@@ -128,19 +129,20 @@ class TestBestTierId:
 
 
 class TestRenderEquipment:
-    def test_empty_inventory_all_vacant(self):
+    def test_empty_inventory_tools_vacant_armor_omitted(self):
+        # Tools always emit a vacant line (wood-tier is craftable from logs
+        # alone; the nudge is actionable). Armor is gated on craftability —
+        # without leather/iron/etc. in inventory, armor lines are omitted to
+        # avoid steering the model into hallucinating wooden_helmet.
         lines = _render_equipment({})
         assert lines[0] == "Equipment:"
-        # All 4 tools + 4 armor slots reported as vacant.
         body = "\n".join(lines[1:])
         assert "best weapon: you are unarmed! (no sword crafted yet)" in body
         assert "best shovel: you are digging barehanded! (no shovel crafted yet)" in body
         assert "best pickaxe: you cannot mine stone yet! (no pickaxe crafted yet)" in body
         assert "best axe: you are chopping barehanded! (no axe crafted yet)" in body
-        assert "helmet: you have no helmet! (no helmet crafted yet)" in body
-        assert "chestplate: you have no chestplate! (no chestplate crafted yet)" in body
-        assert "leggings: you have no leggings! (no leggings crafted yet)" in body
-        assert "boots: you have no boots! (no boots crafted yet)" in body
+        for slot in ("helmet", "chestplate", "leggings", "boots"):
+            assert slot not in body
 
     def test_wood_pickaxe_only(self):
         inv = _mk(main=["minecraft:wooden_pickaxe"])
@@ -186,6 +188,106 @@ class TestRenderEquipment:
         body = "\n".join(_render_equipment(inv))
         assert "helmet: iron_helmet" in body
         assert "leather_helmet" not in body
+
+
+# ---------------------------------------------- armor craftability gating
+
+
+class TestBestCraftableArmorMaterial:
+    def test_empty(self):
+        assert _best_craftable_armor_material(set()) is None
+
+    def test_logs_alone_dont_qualify(self):
+        # The bug: model confabulates wooden_helmet (no such recipe). Logs
+        # in inventory must NOT imply armor is craftable.
+        assert _best_craftable_armor_material({"minecraft:oak_log"}) is None
+        assert _best_craftable_armor_material({"minecraft:birch_planks"}) is None
+
+    def test_leather_qualifies(self):
+        assert _best_craftable_armor_material({"minecraft:leather"}) == "leather"
+
+    def test_iron_qualifies(self):
+        assert _best_craftable_armor_material({"minecraft:iron_ingot"}) == "iron"
+
+    def test_iron_beats_leather(self):
+        ids = {"minecraft:leather", "minecraft:iron_ingot"}
+        assert _best_craftable_armor_material(ids) == "iron"
+
+    def test_diamond_beats_iron(self):
+        ids = {"minecraft:iron_ingot", "minecraft:diamond"}
+        assert _best_craftable_armor_material(ids) == "diamond"
+
+    def test_netherite_is_top(self):
+        ids = {"minecraft:diamond", "minecraft:netherite_ingot"}
+        assert _best_craftable_armor_material(ids) == "netherite"
+
+    def test_raw_iron_does_not_qualify(self):
+        # Raw iron needs smelting; armor recipe needs ingots.
+        assert _best_craftable_armor_material({"minecraft:raw_iron"}) is None
+
+
+class TestArmorGating:
+    """Armor lines only render when equipped OR materials are present.
+
+    Pins the fix for the 2026-05-20 wooden_helmet loop: with no armor and no
+    materials, agent saw 5/5 → wooden_helmet (non-existent recipe). The
+    gating removes the prompt pressure when no recipe could succeed.
+    """
+
+    def test_no_armor_no_materials_omits_all_armor(self):
+        inv = _mk(main=["minecraft:wooden_pickaxe", "minecraft:birch_log"])
+        body = "\n".join(_render_equipment(inv))
+        for slot in ("helmet", "chestplate", "leggings", "boots"):
+            assert slot not in body
+
+    def test_leather_in_inventory_surfaces_leather_armor_hints(self):
+        inv = _mk(main=["minecraft:leather"])
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: none — leather_helmet craftable" in body
+        assert "chestplate: none — leather_chestplate craftable" in body
+        assert "leggings: none — leather_leggings craftable" in body
+        assert "boots: none — leather_boots craftable" in body
+
+    def test_iron_ingot_surfaces_iron_armor_hints(self):
+        inv = _mk(main=["minecraft:iron_ingot"])
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: none — iron_helmet craftable" in body
+        assert "boots: none — iron_boots craftable" in body
+
+    def test_iron_supersedes_leather_in_hint_text(self):
+        # Best-tier material wins; agent crafts iron not leather.
+        inv = _mk(main=["minecraft:leather", "minecraft:iron_ingot"])
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: none — iron_helmet craftable" in body
+        assert "leather_helmet" not in body
+
+    def test_equipped_armor_overrides_hint(self):
+        # Wearing leather_helmet AND has iron — readout shows what's worn,
+        # not a hint to upgrade. (Upgrade is the model's job to spot.)
+        inv = _mk(head="minecraft:leather_helmet", main=["minecraft:iron_ingot"])
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: leather_helmet" in body
+        # Other slots: no equipped, iron available → hint.
+        assert "chestplate: none — iron_chestplate craftable" in body
+
+    def test_partial_armor_some_equipped_others_hinted(self):
+        inv = _mk(
+            head="minecraft:iron_helmet",
+            chest="minecraft:iron_chestplate",
+            main=["minecraft:iron_ingot"],
+        )
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: iron_helmet" in body
+        assert "chestplate: iron_chestplate" in body
+        assert "leggings: none — iron_leggings craftable" in body
+        assert "boots: none — iron_boots craftable" in body
+
+    def test_tools_still_emit_vacant_phrases(self):
+        # Gating is armor-only — tool nudges always fire (they're actionable).
+        inv = _mk(main=["minecraft:dirt"])
+        body = "\n".join(_render_equipment(inv))
+        assert "best weapon: you are unarmed!" in body
+        assert "best pickaxe: you cannot mine stone yet!" in body
 
 
 # ---------------------------------------------- _format_inventory
