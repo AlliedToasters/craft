@@ -588,6 +588,37 @@ def _fetch_inventory() -> str | None:
     return "\n".join(lines)
 
 
+def _build_state_chunk(
+    stats_str: str | None,
+    inv_str: str | None,
+    smelts_str: str | None,
+) -> str:
+    """Render the per-turn STATE body delivered as its own user message.
+
+    World state (stats / inventory / active smelts) used to be concatenated
+    onto each tool result, which left the *opening* user message pinned to
+    spawn-time stats forever and made SFT extraction ambiguous (which
+    `Stats:` line is the live one?). Splitting state into its own message
+    gives every turn a single canonical state slot the model attends to.
+
+    Always returns a non-empty string. Transport failures surface as
+    explicit "(unavailable …)" literals rather than silent omission, so a
+    homunculus blip doesn't silently strip state from the prompt.
+    """
+    parts: list[str] = []
+    if stats_str:
+        parts.append(stats_str)
+    else:
+        parts.append("Stats: (unavailable — homunculus transport error)")
+    if inv_str:
+        parts.append(inv_str)
+    else:
+        parts.append("Current inventory: (unavailable — homunculus transport error)")
+    if smelts_str:
+        parts.append(smelts_str)
+    return "STATE:\n" + "\n\n".join(parts)
+
+
 def _stats_raw() -> dict | None:
     """Raw /stats response, or None on transport error. Sister to _fetch_stats."""
     try:
@@ -908,31 +939,40 @@ def run(
             }
         jsonl_fh.write(json.dumps(header) + "\n")
 
-    initial_inv = _fetch_inventory()
-    initial_stats = _fetch_stats()
-    initial_smelts = _fetch_smelts()
-    opening_parts = ["Begin. Read your stats and inventory before deciding the next action."]
-    if initial_stats:
-        opening_parts.append(initial_stats)
-    if initial_inv:
-        opening_parts.append(initial_inv)
-    else:
-        opening_parts.append("(Inventory unavailable — homunculus may be offline.)")
-    if initial_smelts:
-        opening_parts.append(initial_smelts)
-    opening = "\n\n".join(opening_parts)
+    # Opening is pure instruction text — no spawn-time stats/inventory baked in.
+    # The opening used to embed initial Stats/Inventory inline, which then went
+    # stale forever (the user message at index 1 still claimed "Current
+    # inventory: (empty)" 50 turns into a diamond rollout). State is now an
+    # *ephemeral* per-turn injection at prompt-construction time — never
+    # persisted to history — so the model sees exactly one STATE block per
+    # prompt, always at the tail, always fresh.
+    opening = (
+        "Begin. The STATE: block at the end of each prompt holds the current "
+        "stats, inventory, and any active smelts — read it before deciding "
+        "your next tool call. Earlier turns in the transcript show only what "
+        "you did and what each tool returned; the STATE there is intentionally "
+        "absent (it would be stale)."
+    )
 
     messages: list[dict] = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": opening},
     ]
+    # Carried state — refreshed at the end of each turn from the post-dispatch
+    # fetches, injected at the head of the next turn's prompt. Computed once
+    # before the loop so turn 1's prompt isn't blind.
+    pending_state = _build_state_chunk(
+        _fetch_stats(), _fetch_inventory(), _fetch_smelts(),
+    )
     # Cap conversation length to the last N turns so prefill stays bounded.
-    # Each turn appends exactly 2 messages (assistant + tool_result), so we
-    # keep messages[:2] (system + opening) and the last 2*WINDOW_TURNS pairs.
-    # Set generously enough that within-rollout dependencies (e.g., what the
-    # agent crafted 5 turns ago) survive, but aggressively enough that 50-turn
-    # rollouts don't blow up prefill cost: gemma median plan_s climbed from
-    # ~10s on early turns to 60-80s on late turns in 2026-05-14 rollouts.
+    # Each turn appends exactly 2 messages (assistant tool_call + tool result)
+    # to the persistent history — the STATE injection happens at prompt-build
+    # time and is NOT stored. We keep messages[:2] (system + opening) and the
+    # last 2*WINDOW_TURNS pairs. Set generously enough that within-rollout
+    # dependencies (e.g., what the agent crafted 5 turns ago) survive, but
+    # aggressively enough that 50-turn rollouts don't blow up prefill cost:
+    # gemma median plan_s climbed from ~10s on early turns to 60-80s on late
+    # turns in 2026-05-14 rollouts.
     WINDOW_TURNS = 8
     print(f"=== goal={goal}, max_turns={max_turns} permadeath (window={WINDOW_TURNS}) ===")
 
@@ -969,13 +1009,16 @@ def run(
         milestone_event = None
         print(f"\n=== turn {turn}/{max_turns}: planning ===")
         plan_start = time.perf_counter()
-        # Snapshot the prompt as passed to the model — load-bearing for
-        # the _type:"llm" record. messages[1] gets reassigned by milestones
-        # later in the turn (creating a new dict), and the list grows on
-        # assistant/tool appends, but `list(messages)` here freezes the
-        # references at call time so the snapshot stays faithful.
-        prompt_snapshot = list(messages)
-        tool_calls, content, reasoning, raw_message = chat_with_tools(messages, TOOLS, model=model)
+        # Build the prompt by appending the *current* STATE to history. This
+        # is the only place STATE enters the conversation — it never lands
+        # in `messages` itself, so the next turn won't see this turn's stale
+        # STATE alongside its own fresh one. prompt_messages is a fresh list,
+        # safe to use as both the LLM input and the JSONL snapshot.
+        prompt_messages = messages + [
+            {"role": "user", "content": pending_state},
+        ]
+        prompt_snapshot = prompt_messages
+        tool_calls, content, reasoning, raw_message = chat_with_tools(prompt_messages, TOOLS, model=model)
         plan_dt = time.perf_counter() - plan_start
         plan_s_total += plan_dt
         plan_s_count += 1
@@ -990,7 +1033,7 @@ def run(
                     break
                 retry_start = time.perf_counter()
                 print(f"[retry] empty response, retry {retry_i + 1}/{EMPTY_RETRIES}", flush=True)
-                tool_calls, content, reasoning, raw_message = chat_with_tools(messages, TOOLS, model=model)
+                tool_calls, content, reasoning, raw_message = chat_with_tools(prompt_messages, TOOLS, model=model)
                 retry_dt = time.perf_counter() - retry_start
                 plan_dt += retry_dt
                 plan_s_total += retry_dt
@@ -1166,18 +1209,20 @@ def run(
         inv_str = _fetch_inventory()
         smelts_str = _fetch_smelts()
         shelter_str = _poll_shelter_watch()
-        chunks = [outcome]
         if stats_str:
             print(f"[stats] {stats_str}")
-            chunks.append(stats_str)
         if inv_str:
             print(f"[inventory]\n{inv_str}")
-            chunks.append(inv_str)
         else:
             print("[inventory] failed to fetch (homunculus may be offline)")
         if smelts_str:
             print(f"[smelts]\n{smelts_str}")
-            chunks.append(smelts_str)
+        # Tool message carries only what's *tied to this turn's event*: the
+        # dispatch outcome plus reflex/death preambles plus shelter alerts.
+        # World snapshot (stats/inv/smelts) lives in a separate role:user
+        # message appended below so SFT has a clean structural split between
+        # "what the action returned" and "what the world looks like now".
+        chunks = [outcome]
         # Shelter alerts are urgent — prepend so the LLM reads them first.
         if shelter_str:
             print(f"[shelter_watch] {shelter_str}")
@@ -1193,6 +1238,7 @@ def run(
         if evaded_preamble:
             chunks.insert(0, evaded_preamble)
         full_outcome = "\n\n".join(chunks)
+        state_chunk = _build_state_chunk(stats_str, inv_str, smelts_str)
 
         # Surface any death that landed during this turn. We use the most
         # recent record (deaths are rare; multi-death within one turn is a
@@ -1215,6 +1261,11 @@ def run(
                 "content": full_outcome,
             }
         )
+        # Refresh the carried STATE for the next turn's prompt. Not appended
+        # to messages — STATE is ephemeral by design (one per prompt, always
+        # at the tail, always fresh) so the model never sees a stale snapshot
+        # mixed in with the action history.
+        pending_state = state_chunk
 
         # Milestone check — predicates over stats + inventory. Fires at most
         # once per milestone per rollout. The announcement is appended to the
@@ -1233,10 +1284,12 @@ def run(
             }
 
         # Trim older turns to keep prefill cost bounded. Each turn appends
-        # exactly 2 messages, so messages[2:] grows by 2 per turn. We keep
-        # messages[:2] (system + opening) and the most-recent 2*WINDOW_TURNS
-        # entries. Pair-aligned slicing is critical — orphaning an assistant
-        # tool_call without its matching tool_result breaks the API contract.
+        # exactly 2 messages to the persistent history (assistant tool_call +
+        # tool result); STATE injection happens at prompt-build time and isn't
+        # stored. We keep messages[:2] (system + opening) and the most-recent
+        # 2*WINDOW_TURNS entries. Pair-aligned slicing is critical —
+        # orphaning an assistant tool_call without its matching tool_result
+        # breaks the API contract.
         max_msgs = 2 + 2 * WINDOW_TURNS
         if len(messages) > max_msgs:
             messages = messages[:2] + messages[-2 * WINDOW_TURNS:]
