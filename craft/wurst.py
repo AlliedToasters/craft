@@ -25,6 +25,7 @@ SURVIVAL_HACKS: tuple[str, ...] = (
     "AutoSword",       # auto-switch to a sword when attacking — pairs with AutoTool/KillAura
     "AntiKnockback",   # suppress mob knockback (prevents fall-into-lava cascades)
     "AntiSpam",        # collapse spammy chat (keeps logs readable)
+    "AutoDrop",        # tick-by-tick drop of items on its filter — seeded by autodrop policy
 )
 # AutoSwim was tried 2026-05-14 (after gemma R4 drowning) but removed
 # 2026-05-16 — it thrashes against Baritone's swim/jump handling and
@@ -76,6 +77,64 @@ def status(*, timeout: float = 5.0) -> dict:
         return resp.json()
     except (requests.RequestException, ValueError) as e:
         return {"success": False, "reason": "transport_error", "message": str(e)}
+
+
+def set_item_list(
+    hack: str,
+    setting: str,
+    items: list[str],
+    *,
+    op: str = "replace",
+    timeout: float = 10.0,
+) -> dict:
+    """POST /wurst/setting for an ItemListSetting.
+
+    Used by `seed_autodrop_from_tier()` to push the computed drop list into
+    AutoDrop's `Items` setting. Returns the parsed response dict; transport
+    errors fold into the standard {success: False, reason: "transport_error"}
+    shape so callers can branch uniformly.
+    """
+    try:
+        resp = requests.post(
+            f"{HOMUNCULUS_BASE}/wurst/setting",
+            json={"hack": hack, "setting": setting, "op": op, "value": items},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"success": False, "reason": "transport_error", "message": str(e)}
+
+
+def seed_autodrop_from_tier(tier: str, *, verbose: bool = True) -> dict:
+    """Push the autodrop policy's drop-list-for-tier into AutoDrop.Items.
+
+    Composes craft.autodrop's whitelist policy with the /wurst/setting
+    transport. Returns {ok: bool, tier, drop_count, raw} so the caller can
+    log + record in JSONL headers.
+
+    AutoDrop must already be enabled (handled by ensure_hacks_on) — the
+    setting is purely about policy, not module state.
+    """
+    from craft.autodrop import drop_list_for_tier  # avoid import cycle at module load
+
+    drops = drop_list_for_tier(tier)
+    resp = set_item_list("AutoDrop", "Items", drops, op="replace")
+    ok = bool(resp.get("success"))
+    if verbose:
+        if ok:
+            print(
+                f"[autodrop] seeded tier={tier} drops={len(drops)} "
+                f"(changed={resp.get('changed')})",
+                flush=True,
+            )
+        else:
+            print(
+                f"[autodrop] FAILED tier={tier} reason={resp.get('reason')} "
+                f"msg={resp.get('message', '')[:120]}",
+                flush=True,
+            )
+    return {"ok": ok, "tier": tier, "drop_count": len(drops), "raw": resp}
 
 
 def ensure_hacks_on(

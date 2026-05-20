@@ -36,6 +36,7 @@ from craft.world import (
     set_time,
 )
 from craft.wurst import ensure_hacks_on as ensure_wurst_hacks_on
+from craft.wurst import seed_autodrop_from_tier as _seed_autodrop_from_tier
 
 
 # Hostile types the shelter watcher polls for. Tight list — covers the
@@ -675,6 +676,22 @@ def _equipment_readout_enabled() -> bool:
     return raw not in ("0", "false", "off", "no")
 
 
+def _autodrop_tier_setting() -> str:
+    """Tier the AutoDrop whitelist is seeded to at startup.
+
+    Env: CRAFT_AUTODROP_TIER (default "bare"). Set to "off" to skip seeding —
+    AutoDrop reverts to Wurst's tiny default filter (flowers + rotten_flesh).
+    "stone"/"iron"/"diamond" force higher tiers for testing.
+    """
+    raw = os.environ.get("CRAFT_AUTODROP_TIER", "bare").strip().lower()
+    if raw in ("0", "false", "off", "no", ""):
+        return "off"
+    if raw not in ("bare", "stone", "iron", "diamond"):
+        print(f"[autodrop] WARN unknown CRAFT_AUTODROP_TIER={raw!r}; defaulting to 'bare'", flush=True)
+        return "bare"
+    return raw
+
+
 def _format_inventory(inv: dict | None) -> str | None:
     """Render inventory as (optional) Equipment block + raw slot listing.
 
@@ -1002,7 +1019,19 @@ def _apply_setup(
     # be ON for survival rollouts to behave as designed. Before this bridge
     # landed, these depended on the player having toggled them in the UI; a
     # missed click silently invalidated rollout outcomes.
-    return ensure_wurst_hacks_on()
+    wurst_report = ensure_wurst_hacks_on()
+
+    # AutoDrop policy seeding. With AutoDrop now in REQUIRED_HACKS the module
+    # itself is on; this step writes the whitelist-complement drop list into
+    # its `Items` setting so the policy is an *inclusion* list of "what to
+    # keep" rather than Wurst's tiny exclusion default.
+    tier = _autodrop_tier_setting()
+    if tier != "off":
+        autodrop_report = _seed_autodrop_from_tier(tier)
+        wurst_report["autodrop"] = autodrop_report
+    else:
+        wurst_report["autodrop"] = {"ok": None, "tier": "off", "drop_count": 0}
+    return wurst_report
 
 
 def run(
@@ -1051,6 +1080,12 @@ def run(
                 "wurst_loaded": wurst_report.get("wurst_loaded"),
                 "enabled": [r["name"] for r in wurst_report.get("results", []) if r.get("ok")],
                 "failed": [r["name"] for r in wurst_report.get("results", []) if not r.get("ok")],
+            }
+            ad = wurst_report.get("autodrop") or {}
+            header["autodrop"] = {
+                "tier": ad.get("tier"),
+                "ok": ad.get("ok"),
+                "drop_count": ad.get("drop_count"),
             }
         # Spawn-time snapshot for rolling-rollout analysis. Captures the
         # precise incidental MC time-of-day each rollout lands on (not just
