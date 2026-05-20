@@ -370,12 +370,42 @@ MINIMAL_PROMPT = (
 )
 
 
+BARE_PROMPT = (
+    "You are playing Minecraft. Call one tool.\n\n"
+    "Tools:\n"
+    "- mine_wood(quantity)\n"
+    "- mine_stone(quantity)\n"
+    "- mine_coal(quantity, fair?)\n"
+    "- mine_iron(quantity, fair?)\n"
+    "- mine_diamond(quantity, fair?)\n"
+    "  fair=true → blind 1×2 tunnel at current Y (no candidate targeting).\n"
+    "- craft(item, quantity, location?) — handles sub-recipes; places crafting table / furnace as needed\n"
+    "- smelt(input, count, location?) — async; returns immediately; auto-places furnace, auto-picks fuel\n"
+    "- collect_smelt(furnace_pos?) — pull finished outputs from furnace\n"
+    "- place(item)\n"
+    "- surface() — navigate up to sky\n"
+    "- descend(target_y) — dig down to Y\n"
+    "- travel(direction, distance) — walk up to 64 blocks N/S/E/W\n"
+    "- look_around(radius?) — read-only scout call; describes nearby terrain, "
+    "hazards, and resources with cardinal hints. radius=1 ~3s (1 chunk), "
+    "radius=2 ~5s (3×3, default), radius=3 ~8s (5×5).\n"
+    "- build_shelter() — carve a 5×2×5 room, wall it in, install a door. "
+    "Requires: wooden door in inventory + ~90 solid blocks (cobblestone/dirt/etc). Surface only.\n"
+    "- wall_in() — tunnel 3 cells into the nearest cardinal wall and seal yourself in "
+    "(1-cell foyer + 2 blocks placed + 2-cell back cavity). Requires: flush against a "
+    "solid wall (cave wall, hillside). Tunnel produces enough stone for the seal.\n"
+    "- carve_alcove() — carve a 2×3 alcove off your back cavity for crafting_table / "
+    "furnace / bed. Requires: an active wall_in pocket.\n"
+)
+
+
 GOAL_PROMPTS = {
     "diamond": SYSTEM_PROMPT,
     "survive": SURVIVE_PROMPT,
     "survive_first": SURVIVE_FIRST_PROMPT,
     "survive_shelter": SURVIVE_SHELTER_PROMPT,
     "minimal": MINIMAL_PROMPT,
+    "bare": BARE_PROMPT,
 }
 
 
@@ -946,13 +976,20 @@ def run(
     # *ephemeral* per-turn injection at prompt-construction time — never
     # persisted to history — so the model sees exactly one STATE block per
     # prompt, always at the tail, always fresh.
-    opening = (
-        "Begin. The STATE: block at the end of each prompt holds the current "
-        "stats, inventory, and any active smelts — read it before deciding "
-        "your next tool call. Earlier turns in the transcript show only what "
-        "you did and what each tool returned; the STATE there is intentionally "
-        "absent (it would be stale)."
-    )
+    if goal == "bare":
+        # Bare path: defer all judgement to the model's MC pretraining +
+        # constraint assumptions inferable from the tool list. No STATE
+        # explainer, no substrate facts, no movement notes. Validated
+        # (qwen3-4B): identical decisions vs. minimal with less noise.
+        opening = "Begin."
+    else:
+        opening = (
+            "Begin. The STATE: block at the end of each prompt holds the current "
+            "stats, inventory, and any active smelts — read it before deciding "
+            "your next tool call. Earlier turns in the transcript show only what "
+            "you did and what each tool returned; the STATE there is intentionally "
+            "absent (it would be stale)."
+        )
 
     messages: list[dict] = [
         {"role": "system", "content": prompt},
