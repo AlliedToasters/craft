@@ -80,9 +80,38 @@ M1 = Milestone(
 )
 
 
+def _m2_predicate(state: dict) -> bool:
+    """Has iron_pickaxe AND iron_sword.
+
+    The unique gate to diamond is iron_pickaxe (no other tool can mine
+    diamond_ore). iron_sword in the pair filters out "just barely crafted
+    iron_pickaxe" agents — paired with iron_sword it signals invested
+    iron-tier progression (enough ingots smelted to spend on offense AND
+    mining). Mirrors M1's two-condition pattern (tool + stability proxy)
+    without a ticks_alive floor: by the time an agent has both iron items,
+    survival time is already large.
+    """
+    inv = state.get("inv") or {}
+    return _has(inv, ":iron_pickaxe") and _has(inv, ":iron_sword")
+
+
+M2 = Milestone(
+    name="M2_diamond_goal",
+    predicate=_m2_predicate,
+    message=(
+        "MILESTONE REACHED. You have iron tools. New goal: descend to y<=11 and "
+        "mine diamond_ore with your iron_pickaxe. Craft diamond_pickaxe, "
+        "diamond_sword, and a full diamond armor set (diamond_helmet, "
+        "diamond_chestplate, diamond_leggings, diamond_boots). "
+        "Bring torches, food, and watch for lava lakes. You may lose this run; "
+        "that's acceptable."
+    ),
+)
+
+
 # Ordered milestone chain. Each milestone fires at most once per rollout.
-# Future milestones (e.g. M2_diamond_goal) append here.
-MILESTONES: list[Milestone] = [M1]
+# Future milestones (e.g. M3_netherite_goal) append here.
+MILESTONES: list[Milestone] = [M1, M2]
 
 
 class Milestones:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from craft.milestones import M1, Milestone, Milestones, _has
+from craft.milestones import M1, M2, Milestone, Milestones, _has
 
 
 # -------------------------------------------------------------------- _has
@@ -64,6 +64,47 @@ class TestM1Predicate:
         # should not silently widen.
         assert not M1.predicate(
             {"inv": {"minecraft:iron_pickaxe": 1}, "ticks_alive": 20000}
+        )
+
+
+# ---------------------------------------------------------- M2 predicate
+
+
+class TestM2Predicate:
+    def test_needs_both_iron_pickaxe_and_iron_sword(self):
+        # Only iron_pickaxe → no fire
+        assert not M2.predicate(
+            {"inv": {"minecraft:iron_pickaxe": 1, "minecraft:dirt": 5}}
+        )
+        # Only iron_sword → no fire
+        assert not M2.predicate(
+            {"inv": {"minecraft:iron_sword": 1, "minecraft:dirt": 5}}
+        )
+        # Both → fire
+        assert M2.predicate(
+            {"inv": {"minecraft:iron_pickaxe": 1, "minecraft:iron_sword": 1}}
+        )
+
+    def test_wooden_tools_do_not_satisfy(self):
+        # Common confound: agent has wooden_pickaxe + wooden_sword. Must not
+        # fire — M1 already covered this state.
+        assert not M2.predicate(
+            {"inv": {"minecraft:wooden_pickaxe": 1, "minecraft:wooden_sword": 1}}
+        )
+
+    def test_stone_pickaxe_does_not_satisfy(self):
+        # stone_pickaxe + iron_sword shouldn't fire — model needs iron_pickaxe
+        # specifically (it's the gate to diamond).
+        assert not M2.predicate(
+            {"inv": {"minecraft:stone_pickaxe": 1, "minecraft:iron_sword": 1}}
+        )
+
+    def test_no_ticks_alive_floor(self):
+        # M2 has no time-alive requirement (unlike M1). If an agent happens
+        # to get both iron items quickly, fire immediately.
+        assert M2.predicate(
+            {"inv": {"minecraft:iron_pickaxe": 1, "minecraft:iron_sword": 1},
+             "ticks_alive": 0}
         )
 
 
@@ -152,6 +193,52 @@ class TestMilestonesCheck:
 
 
 # ------------------------------------------- custom milestone chain
+
+
+class TestDefaultChainFiresM1ThenM2:
+    """End-to-end: default Milestones() picks up both M1 and M2 in order."""
+
+    def test_m1_then_m2(self):
+        ms = Milestones()
+        # Spawn anchor
+        ms.check(_stats(0, 0), {}, turn=1)
+        # M1 fires: wooden_pickaxe + 12000 ticks
+        e1 = ms.check(
+            _stats(0, 12000),
+            {"minecraft:wooden_pickaxe": 1},
+            turn=10,
+        )
+        assert e1 is not None and e1.name == "M1_iron_goal"
+        # Time passes; iron_pickaxe + iron_sword acquired
+        e2 = ms.check(
+            _stats(2, 6000),
+            {
+                "minecraft:wooden_pickaxe": 1,
+                "minecraft:iron_pickaxe": 1,
+                "minecraft:iron_sword": 1,
+            },
+            turn=120,
+        )
+        assert e2 is not None and e2.name == "M2_diamond_goal"
+
+    def test_m2_blocked_until_m1_fires_when_iron_reached_first(self):
+        """If iron is reached before M1's time floor, M1 still fires first
+        (predicate-evaluation order respects MILESTONES list order)."""
+        ms = Milestones()
+        ms.check(_stats(0, 0), {}, turn=1)
+        # Day 0 ticks 12000 — wooden_pickaxe present, iron set already too.
+        # Both predicates satisfied simultaneously; M1 wins because it's
+        # earlier in the chain.
+        inv = {
+            "minecraft:wooden_pickaxe": 1,
+            "minecraft:iron_pickaxe": 1,
+            "minecraft:iron_sword": 1,
+        }
+        e = ms.check(_stats(0, 12000), inv, turn=15)
+        assert e is not None and e.name == "M1_iron_goal"
+        # Next call: M1 fired, M2 now eligible.
+        e2 = ms.check(_stats(0, 13000), inv, turn=16)
+        assert e2 is not None and e2.name == "M2_diamond_goal"
 
 
 class TestCustomMilestones:
