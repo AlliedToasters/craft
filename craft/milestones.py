@@ -81,28 +81,35 @@ M1 = Milestone(
 
 
 def _m2_predicate(state: dict) -> bool:
-    """Has iron_pickaxe AND iron_sword.
+    """Has the full iron armor set: helmet + chestplate + leggings + boots.
 
-    The unique gate to diamond is iron_pickaxe (no other tool can mine
-    diamond_ore). iron_sword in the pair filters out "just barely crafted
-    iron_pickaxe" agents — paired with iron_sword it signals invested
-    iron-tier progression (enough ingots smelted to spend on offense AND
-    mining). Mirrors M1's two-condition pattern (tool + stability proxy)
-    without a ticks_alive floor: by the time an agent has both iron items,
-    survival time is already large.
+    Empirically (sprint 2026-05-20 armor-nudge-gating campaign), surviving
+    qwen agents reliably reach iron tier but stall there, hoarding redundant
+    iron tools/armor instead of risking the descent. Gating M2 on the
+    *complete* armor set (rather than iron tools as in an earlier draft)
+    serves the trajectory we want: a deep-delve to diamond is dangerous,
+    full iron armor is the protective investment that makes it survivable,
+    so the milestone naturally fires *exactly when* the agent has paid the
+    cost that justifies the risk. Distinct in shape from M1 (which uses
+    tool + stability) — M2 uses armor completeness, no ticks_alive floor.
     """
     inv = state.get("inv") or {}
-    return _has(inv, ":iron_pickaxe") and _has(inv, ":iron_sword")
+    return (
+        _has(inv, ":iron_helmet")
+        and _has(inv, ":iron_chestplate")
+        and _has(inv, ":iron_leggings")
+        and _has(inv, ":iron_boots")
+    )
 
 
 M2 = Milestone(
     name="M2_diamond_goal",
     predicate=_m2_predicate,
     message=(
-        "MILESTONE REACHED. You have iron tools. New goal: descend to y<=11 and "
-        "mine diamond_ore with your iron_pickaxe. Craft diamond_pickaxe, "
-        "diamond_sword, and a full diamond armor set (diamond_helmet, "
-        "diamond_chestplate, diamond_leggings, diamond_boots). "
+        "MILESTONE REACHED. You have a full iron armor set. New goal: descend "
+        "to y<=11 and mine diamond_ore with an iron_pickaxe. Craft "
+        "diamond_pickaxe, diamond_sword, and a full diamond armor set "
+        "(diamond_helmet, diamond_chestplate, diamond_leggings, diamond_boots). "
         "Bring torches, food, and watch for lava lakes. You may lose this run; "
         "that's acceptable."
     ),
@@ -112,6 +119,42 @@ M2 = Milestone(
 # Ordered milestone chain. Each milestone fires at most once per rollout.
 # Future milestones (e.g. M3_netherite_goal) append here.
 MILESTONES: list[Milestone] = [M1, M2]
+
+# Name -> Milestone registry, used by `resolve_milestones` to interpret
+# the CRAFT_MILESTONES env var (and any future declarative chain spec).
+# Add new milestones above and they become A/B-selectable automatically.
+MILESTONES_BY_NAME: dict[str, Milestone] = {m.name: m for m in MILESTONES}
+
+
+def resolve_milestones(spec: str | None) -> list[Milestone]:
+    """Resolve a milestone chain from an env-spec string.
+
+    spec is the raw value of `CRAFT_MILESTONES`:
+    - None (env unset)        -> default chain (all of MILESTONES, in order).
+    - "" (set but empty)      -> empty chain (no milestones fire).
+    - "M1_iron_goal,M2_..."   -> exactly those milestones, in the order given.
+    - Unknown name            -> ValueError. Silent drops would let typos turn
+                                a campaign arm into a no-op without warning.
+
+    The user-supplied order is honored — earlier entries get evaluation
+    priority when multiple predicates fire on the same turn (mirrors the
+    list semantics in `Milestones.check`).
+    """
+    if spec is None:
+        return list(MILESTONES)
+    tokens = [tok.strip() for tok in spec.split(",")]
+    tokens = [tok for tok in tokens if tok]  # drop empties from "M1,,M2"
+    chain: list[Milestone] = []
+    for name in tokens:
+        m = MILESTONES_BY_NAME.get(name)
+        if m is None:
+            known = ", ".join(MILESTONES_BY_NAME) or "(none)"
+            raise ValueError(
+                f"Unknown milestone '{name}' in CRAFT_MILESTONES. "
+                f"Known milestones: {known}."
+            )
+        chain.append(m)
+    return chain
 
 
 class Milestones:

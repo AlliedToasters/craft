@@ -19,7 +19,7 @@ import requests
 
 from craft.config import PLAYER_NAME as _PLAYER_NAME, SERVER_CMD_BASE as _SERVER_CMD_BASE
 from craft.llm import chat_with_tools, DEFAULT_MODEL
-from craft.milestones import Milestones
+from craft.milestones import Milestones, resolve_milestones
 from craft.mine import _yaw_to_direction
 from craft.spawn import random_spawn
 from craft.tools import (
@@ -1121,6 +1121,11 @@ def run(
             "started_at": time.time(),
             "equipment_readout": _equipment_readout_enabled(),
             "armor_nudge_gating": _armor_nudge_gating_enabled(),
+            "milestones": [
+                m.name for m in resolve_milestones(
+                    os.environ.get("CRAFT_MILESTONES")
+                )
+            ],
         }
         if wurst_report is not None:
             header["wurst_preflight"] = {
@@ -1203,8 +1208,10 @@ def run(
     # Milestone framework — staged goal progression. Predicates evaluated per
     # turn against stats + inventory. When one fires, its announcement is
     # appended to the opening (messages[1]) so it persists past the WINDOW
-    # trim and lands in every subsequent prefill.
-    milestones = Milestones()
+    # trim and lands in every subsequent prefill. Chain is selected from
+    # CRAFT_MILESTONES (comma-separated names; unset → default chain).
+    milestone_chain = resolve_milestones(os.environ.get("CRAFT_MILESTONES"))
+    milestones = Milestones(milestones=milestone_chain)
 
     # Accumulators for the LLM-idle-time post-mortem. Each rollout's plan_s
     # total is the answer to "how long was the harness standing around

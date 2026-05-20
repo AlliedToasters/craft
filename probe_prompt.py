@@ -128,9 +128,9 @@ def v_strict_one() -> str:
 def v_anti_leak() -> str:
     """Baseline + explicit anti-template-token instruction (no batching rule change)."""
     extra = (
-        "OUTPUT FORMAT: Respond with a single tool call. Leave the content field empty. "
-        "Do NOT emit <|channel|>, <|tool_response|>, <|message|>, or any other '<|...|>' tokens — "
-        "they are not part of your output schema.\n\n"
+        # "OUTPUT FORMAT: Respond with a single tool call. Leave the content field empty. "
+        # "Do NOT emit <|channel|>, <|tool_response|>, <|message|>, or any other '<|...|>' tokens — "
+        # "they are not part of your output schema.\n\n"
     )
     return extra + BASELINE_PROMPT
 

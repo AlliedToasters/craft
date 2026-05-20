@@ -2,7 +2,15 @@
 
 import pytest
 
-from craft.milestones import M1, M2, Milestone, Milestones, _has
+from craft.milestones import (
+    M1,
+    M2,
+    MILESTONES,
+    Milestone,
+    Milestones,
+    _has,
+    resolve_milestones,
+)
 
 
 # -------------------------------------------------------------------- _has
@@ -70,42 +78,65 @@ class TestM1Predicate:
 # ---------------------------------------------------------- M2 predicate
 
 
+_FULL_IRON_ARMOR = {
+    "minecraft:iron_helmet": 1,
+    "minecraft:iron_chestplate": 1,
+    "minecraft:iron_leggings": 1,
+    "minecraft:iron_boots": 1,
+}
+
+
 class TestM2Predicate:
-    def test_needs_both_iron_pickaxe_and_iron_sword(self):
-        # Only iron_pickaxe → no fire
+    def test_needs_full_iron_armor_set(self):
+        # Full set → fire
+        assert M2.predicate({"inv": dict(_FULL_IRON_ARMOR)})
+
+    def test_missing_any_piece_blocks_fire(self):
+        # Drop each piece in turn — every removal must block.
+        for missing in _FULL_IRON_ARMOR:
+            inv = {k: v for k, v in _FULL_IRON_ARMOR.items() if k != missing}
+            assert not M2.predicate({"inv": inv}), (
+                f"M2 fired with {missing} missing — should require all four pieces"
+            )
+
+    def test_iron_tools_alone_do_not_satisfy(self):
+        # Earlier M2 draft fired on iron_pickaxe + iron_sword. Lock in the
+        # switch: tools alone (no armor) must not fire.
         assert not M2.predicate(
-            {"inv": {"minecraft:iron_pickaxe": 1, "minecraft:dirt": 5}}
-        )
-        # Only iron_sword → no fire
-        assert not M2.predicate(
-            {"inv": {"minecraft:iron_sword": 1, "minecraft:dirt": 5}}
-        )
-        # Both → fire
-        assert M2.predicate(
             {"inv": {"minecraft:iron_pickaxe": 1, "minecraft:iron_sword": 1}}
         )
 
-    def test_wooden_tools_do_not_satisfy(self):
-        # Common confound: agent has wooden_pickaxe + wooden_sword. Must not
-        # fire — M1 already covered this state.
-        assert not M2.predicate(
-            {"inv": {"minecraft:wooden_pickaxe": 1, "minecraft:wooden_sword": 1}}
-        )
+    def test_other_tier_armor_does_not_satisfy(self):
+        # Full leather/golden armor must not fire — predicate is tier-strict.
+        leather = {
+            "minecraft:leather_helmet": 1,
+            "minecraft:leather_chestplate": 1,
+            "minecraft:leather_leggings": 1,
+            "minecraft:leather_boots": 1,
+        }
+        assert not M2.predicate({"inv": leather})
+        golden = {
+            "minecraft:golden_helmet": 1,
+            "minecraft:golden_chestplate": 1,
+            "minecraft:golden_leggings": 1,
+            "minecraft:golden_boots": 1,
+        }
+        assert not M2.predicate({"inv": golden})
 
-    def test_stone_pickaxe_does_not_satisfy(self):
-        # stone_pickaxe + iron_sword shouldn't fire — model needs iron_pickaxe
-        # specifically (it's the gate to diamond).
-        assert not M2.predicate(
-            {"inv": {"minecraft:stone_pickaxe": 1, "minecraft:iron_sword": 1}}
-        )
+    def test_mixed_tier_armor_does_not_satisfy(self):
+        # 3 iron + 1 leather must not fire — full iron set is the gate.
+        mixed = {
+            "minecraft:iron_helmet": 1,
+            "minecraft:iron_chestplate": 1,
+            "minecraft:iron_leggings": 1,
+            "minecraft:leather_boots": 1,
+        }
+        assert not M2.predicate({"inv": mixed})
 
     def test_no_ticks_alive_floor(self):
-        # M2 has no time-alive requirement (unlike M1). If an agent happens
-        # to get both iron items quickly, fire immediately.
-        assert M2.predicate(
-            {"inv": {"minecraft:iron_pickaxe": 1, "minecraft:iron_sword": 1},
-             "ticks_alive": 0}
-        )
+        # M2 has no time-alive requirement (unlike M1). Full armor → fire
+        # immediately, however long that took.
+        assert M2.predicate({"inv": dict(_FULL_IRON_ARMOR), "ticks_alive": 0})
 
 
 # ----------------------------------------------------- Milestones.check
@@ -209,36 +240,85 @@ class TestDefaultChainFiresM1ThenM2:
             turn=10,
         )
         assert e1 is not None and e1.name == "M1_iron_goal"
-        # Time passes; iron_pickaxe + iron_sword acquired
+        # Time passes; full iron armor set acquired
         e2 = ms.check(
             _stats(2, 6000),
-            {
-                "minecraft:wooden_pickaxe": 1,
-                "minecraft:iron_pickaxe": 1,
-                "minecraft:iron_sword": 1,
-            },
+            {"minecraft:wooden_pickaxe": 1, **_FULL_IRON_ARMOR},
             turn=120,
         )
         assert e2 is not None and e2.name == "M2_diamond_goal"
 
-    def test_m2_blocked_until_m1_fires_when_iron_reached_first(self):
-        """If iron is reached before M1's time floor, M1 still fires first
-        (predicate-evaluation order respects MILESTONES list order)."""
+    def test_m2_blocked_until_m1_fires_when_armor_reached_first(self):
+        """If full iron armor is reached before M1's time floor, M1 still
+        fires first (predicate-evaluation order respects MILESTONES list
+        order)."""
         ms = Milestones()
         ms.check(_stats(0, 0), {}, turn=1)
-        # Day 0 ticks 12000 — wooden_pickaxe present, iron set already too.
+        # Day 0 ticks 12000 — wooden_pickaxe present, full iron armor too.
         # Both predicates satisfied simultaneously; M1 wins because it's
         # earlier in the chain.
-        inv = {
-            "minecraft:wooden_pickaxe": 1,
-            "minecraft:iron_pickaxe": 1,
-            "minecraft:iron_sword": 1,
-        }
+        inv = {"minecraft:wooden_pickaxe": 1, **_FULL_IRON_ARMOR}
         e = ms.check(_stats(0, 12000), inv, turn=15)
         assert e is not None and e.name == "M1_iron_goal"
         # Next call: M1 fired, M2 now eligible.
         e2 = ms.check(_stats(0, 13000), inv, turn=16)
         assert e2 is not None and e2.name == "M2_diamond_goal"
+
+
+class TestResolveMilestones:
+    def test_unset_returns_default_chain(self):
+        chain = resolve_milestones(None)
+        assert chain == list(MILESTONES)
+        # Distinct list — caller mutation must not corrupt module state.
+        chain.append(M1)
+        assert resolve_milestones(None) == list(MILESTONES)
+
+    def test_empty_string_returns_empty_chain(self):
+        # Set-but-empty is a real campaign signal: "this arm runs with no
+        # milestones at all." Must differ from unset (= default chain).
+        assert resolve_milestones("") == []
+
+    def test_single_name_resolves(self):
+        chain = resolve_milestones("M1_iron_goal")
+        assert chain == [M1]
+
+    def test_comma_separated_resolves_in_order(self):
+        chain = resolve_milestones("M1_iron_goal,M2_diamond_goal")
+        assert chain == [M1, M2]
+
+    def test_user_order_is_honored(self):
+        # Even though MILESTONES declares M1 before M2, the env var can
+        # override. (Whether *firing* order changes is a Milestones.check
+        # concern; resolver just returns the list as given.)
+        chain = resolve_milestones("M2_diamond_goal,M1_iron_goal")
+        assert chain == [M2, M1]
+
+    def test_whitespace_and_empty_tokens_tolerated(self):
+        chain = resolve_milestones(" M1_iron_goal , , M2_diamond_goal ")
+        assert chain == [M1, M2]
+
+    def test_unknown_name_raises(self):
+        # Silent drop would let a typo in a campaign script turn an arm
+        # into a no-op. Hard error.
+        with pytest.raises(ValueError, match="Unknown milestone"):
+            resolve_milestones("M1_iron_goal,M99_typo")
+
+    def test_milestones_used_with_resolver(self):
+        # End-to-end: feed resolver output into Milestones(), confirm
+        # OFF-arm-equivalent (M1 only) behaves as expected.
+        ms = Milestones(milestones=resolve_milestones("M1_iron_goal"))
+        ms.check(_stats(0, 0), {}, turn=1)
+        # Full iron armor + iron tools → M2 would fire if in chain. It's
+        # NOT in chain here, so nothing fires.
+        inv = {
+            "minecraft:iron_helmet": 1,
+            "minecraft:iron_chestplate": 1,
+            "minecraft:iron_leggings": 1,
+            "minecraft:iron_boots": 1,
+            "minecraft:iron_pickaxe": 1,
+        }
+        # No M1 trigger yet (no wooden_pickaxe), no M2 in chain → None.
+        assert ms.check(_stats(0, 12000), inv, turn=10) is None
 
 
 class TestCustomMilestones:
