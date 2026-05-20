@@ -667,15 +667,28 @@ def _best_craftable_armor_material(ids: set[str]) -> str | None:
     return None
 
 
+def _armor_nudge_gating_enabled() -> bool:
+    """Whether armor lines are craftability-gated (default ON post-2026-05-20).
+
+    Toggle via CRAFT_ARMOR_NUDGE_GATING ("0"/"false"/"off" reverts to the
+    pre-fix legacy "you have no helmet!" nudge for every armor slot, used
+    for A/B regression studies). Resolved per-call so a long-running
+    orchestrator can flip per rollout.
+    """
+    raw = os.environ.get("CRAFT_ARMOR_NUDGE_GATING", "1").strip().lower()
+    return raw not in ("0", "false", "off", "no")
+
+
 def _render_equipment(inv: dict | None) -> list[str]:
     """Per-slot best-of-class equipment block for the STATE readout.
 
     Tool slots always render (vacant phrase + nudge), since wood-tier exists
     for every tool and `craft(wooden_<tool>)` is a valid recipe from logs.
-    Armor slots only render when (a) equipped, or (b) materials are present
-    to craft a real tier; otherwise the line is omitted to avoid nagging the
-    agent into hallucinating `wooden_helmet` (no such recipe). The global
-    `armor=N` in the Stats line remains as the under-armored signal.
+    Armor slots are craftability-gated by default: render when (a) equipped
+    or (b) materials are present to craft a real tier; otherwise the line
+    is omitted to avoid nagging the agent into hallucinating `wooden_helmet`
+    (no such recipe). Setting CRAFT_ARMOR_NUDGE_GATING=0 reverts to legacy
+    "you have no helmet!" for every slot — used for A/B studies.
     """
     lines = ["Equipment:"]
     ids = _all_item_ids(inv)
@@ -685,14 +698,17 @@ def _render_equipment(inv: dict | None) -> list[str]:
             lines.append(f"  {label}: {best.split(':', 1)[-1]}")
         else:
             lines.append(f"  {label}: {vacant} (no {suffix} crafted yet)")
-    material = _best_craftable_armor_material(ids)
+    gating = _armor_nudge_gating_enabled()
+    material = _best_craftable_armor_material(ids) if gating else None
     for label, suffix in _ARMOR_SLOTS:
         best = _best_tier_id(ids, suffix, _ARMOR_TIERS)
         if best:
             lines.append(f"  {label}: {best.split(':', 1)[-1]}")
+        elif not gating:
+            lines.append(f"  {label}: you have no {label}! (no {label} crafted yet)")
         elif material is not None:
             lines.append(f"  {label}: none — {material}_{suffix} craftable")
-        # else: omit the line entirely
+        # else: gating on, no materials → omit the line entirely
     return lines
 
 
@@ -1104,6 +1120,7 @@ def run(
             "player": _PLAYER_NAME,
             "started_at": time.time(),
             "equipment_readout": _equipment_readout_enabled(),
+            "armor_nudge_gating": _armor_nudge_gating_enabled(),
         }
         if wurst_report is not None:
             header["wurst_preflight"] = {

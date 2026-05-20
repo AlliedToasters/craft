@@ -16,6 +16,7 @@ import pytest
 
 from craft.agent import (
     _all_item_ids,
+    _armor_nudge_gating_enabled,
     _best_craftable_armor_material,
     _best_tier_id,
     _equipment_readout_enabled,
@@ -366,3 +367,54 @@ class TestEquipmentReadoutToggle:
         out = _format_inventory(inv)
         assert "Equipment:" in out
         assert "best pickaxe: wooden_pickaxe" in out
+
+
+# ---------------------------------------------- armor-nudge-gating toggle
+
+
+class TestArmorNudgeGatingToggle:
+    """The gating fix can be reverted for A/B regression studies.
+
+    `CRAFT_ARMOR_NUDGE_GATING=0` restores the pre-2026-05-20 behavior:
+    every vacant armor slot emits "you have no <slot>!". Used to measure
+    the impact of the fix against the same code path that produced the
+    1956 wooden_helmet attempts in the previous campaign.
+    """
+
+    def test_default_is_enabled(self, monkeypatch):
+        monkeypatch.delenv("CRAFT_ARMOR_NUDGE_GATING", raising=False)
+        assert _armor_nudge_gating_enabled() is True
+
+    @pytest.mark.parametrize("val", ["0", "false", "off", "no", "FALSE", "Off"])
+    def test_disabled_values(self, monkeypatch, val):
+        monkeypatch.setenv("CRAFT_ARMOR_NUDGE_GATING", val)
+        assert _armor_nudge_gating_enabled() is False
+
+    @pytest.mark.parametrize("val", ["1", "true", "on", "yes", "anything"])
+    def test_enabled_values(self, monkeypatch, val):
+        monkeypatch.setenv("CRAFT_ARMOR_NUDGE_GATING", val)
+        assert _armor_nudge_gating_enabled() is True
+
+    def test_gating_off_restores_legacy_nudge_for_all_slots(self, monkeypatch):
+        monkeypatch.setenv("CRAFT_ARMOR_NUDGE_GATING", "0")
+        body = "\n".join(_render_equipment({}))
+        assert "helmet: you have no helmet! (no helmet crafted yet)" in body
+        assert "chestplate: you have no chestplate! (no chestplate crafted yet)" in body
+        assert "leggings: you have no leggings! (no leggings crafted yet)" in body
+        assert "boots: you have no boots! (no boots crafted yet)" in body
+
+    def test_gating_off_still_shows_equipped_armor(self, monkeypatch):
+        monkeypatch.setenv("CRAFT_ARMOR_NUDGE_GATING", "0")
+        inv = _mk(head="minecraft:iron_helmet")
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: iron_helmet" in body
+        # Other slots fall back to legacy nudge.
+        assert "chestplate: you have no chestplate!" in body
+
+    def test_gating_off_ignores_materials_in_inventory(self, monkeypatch):
+        # Even with leather, legacy mode shows the nag (no recipe hint).
+        monkeypatch.setenv("CRAFT_ARMOR_NUDGE_GATING", "0")
+        inv = _mk(main=["minecraft:leather"])
+        body = "\n".join(_render_equipment(inv))
+        assert "helmet: you have no helmet!" in body
+        assert "leather_helmet craftable" not in body
