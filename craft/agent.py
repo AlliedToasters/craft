@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 
@@ -458,6 +459,11 @@ def _fetch_stats() -> str | None:
         f"food={s.get('food', '?')}",
         f"sat={s.get('saturation', '?')}",
         f"air={s.get('air', '?')}",
+        # Player armor rating (0–20). Full iron set ≈ 15; full diamond = 20.
+        # Distinct from the Equipment block (which lists *which* armor is
+        # worn) — this is the aggregate damage-reduction stat. Belongs in
+        # the always-on stats line so it shows under both toggle arms.
+        f"armor={s.get('armor', '?')}",
     ]
     # Position + facing. A human player gets F3 on demand; the agent used to
     # only learn coordinates from tool result strings (travel/build_shelter/
@@ -589,17 +595,104 @@ def _fetch_smelts() -> str | None:
     return "\n".join(lines)
 
 
-def _fetch_inventory() -> str | None:
-    """Fetch current inventory from homunculus. Returns formatted string or None on error."""
-    try:
-        resp = requests.get(f"{HOMUNCULUS_BASE}/inventory", timeout=5.0)
-        resp.raise_for_status()
-        inv = resp.json()
-    except requests.RequestException:
-        return None
+# Tier ladder + slot tables for the per-turn Equipment readout. Homunculus
+# auto-equips the best tier on /equip, so "best-of-class anywhere in
+# inventory" matches what the agent actually wields. The readout doubles as
+# an implicit nudge: a vacant slot ("you have no helmet!") signals "craft
+# this" without prose. Adding pickaxe → diamond_pickaxe is just inventory
+# changing; the same template flips from vacant to "diamond_pickaxe".
+_TOOL_TIERS: tuple[str, ...] = ("netherite", "diamond", "iron", "stone", "golden", "wooden")
+_TOOL_SLOTS: tuple[tuple[str, str, str], ...] = (
+    # (label,         item suffix, vacant phrase)
+    ("best weapon",  "sword",   "you are unarmed!"),
+    ("best shovel",  "shovel",  "you are digging barehanded!"),
+    ("best pickaxe", "pickaxe", "you cannot mine stone yet!"),
+    ("best axe",     "axe",     "you are chopping barehanded!"),
+)
+_ARMOR_TIERS: tuple[str, ...] = ("netherite", "diamond", "iron", "chainmail", "golden", "leather")
+_ARMOR_SLOTS: tuple[tuple[str, str], ...] = (
+    # (label,        item suffix)
+    ("helmet",     "helmet"),
+    ("chestplate", "chestplate"),
+    ("leggings",   "leggings"),
+    ("boots",      "boots"),
+)
 
-    lines = ["Current inventory:"]
-    main = inv.get("main", [])
+
+def _all_item_ids(inv: dict | None) -> set[str]:
+    """All item ids present anywhere: main + offhand + armor slots."""
+    if not inv:
+        return set()
+    ids: set[str] = set()
+    for slot in (inv.get("main") or []):
+        if slot.get("id"):
+            ids.add(slot["id"])
+    oh = inv.get("offhand")
+    if oh and oh.get("id"):
+        ids.add(oh["id"])
+    for armor_slot in (inv.get("armor") or {}).values():
+        if armor_slot and armor_slot.get("id"):
+            ids.add(armor_slot["id"])
+    return ids
+
+
+def _best_tier_id(ids: set[str], suffix: str, tier_order: tuple[str, ...]) -> str | None:
+    """Highest-tier item id matching f'minecraft:{tier}_{suffix}', or None."""
+    for tier in tier_order:
+        candidate = f"minecraft:{tier}_{suffix}"
+        if candidate in ids:
+            return candidate
+    return None
+
+
+def _render_equipment(inv: dict | None) -> list[str]:
+    """Per-slot best-of-class equipment block for the STATE readout."""
+    lines = ["Equipment:"]
+    ids = _all_item_ids(inv)
+    for label, suffix, vacant in _TOOL_SLOTS:
+        best = _best_tier_id(ids, suffix, _TOOL_TIERS)
+        if best:
+            lines.append(f"  {label}: {best.split(':', 1)[-1]}")
+        else:
+            lines.append(f"  {label}: {vacant} (no {suffix} crafted yet)")
+    for label, suffix in _ARMOR_SLOTS:
+        best = _best_tier_id(ids, suffix, _ARMOR_TIERS)
+        if best:
+            lines.append(f"  {label}: {best.split(':', 1)[-1]}")
+        else:
+            lines.append(f"  {label}: you have no {label}! (no {label} crafted yet)")
+    return lines
+
+
+def _equipment_readout_enabled() -> bool:
+    """Whether the Equipment block is prepended to the inventory readout.
+
+    Toggle via CRAFT_EQUIPMENT_READOUT env var ("0"/"false"/"off" disables;
+    anything else, including unset, leaves it on). Resolved per-call so a
+    single in-process suite can A/B by flipping the var between rollouts.
+    """
+    raw = os.environ.get("CRAFT_EQUIPMENT_READOUT", "1").strip().lower()
+    return raw not in ("0", "false", "off", "no")
+
+
+def _format_inventory(inv: dict | None) -> str | None:
+    """Render inventory as (optional) Equipment block + raw slot listing.
+
+    Returns None when `inv` is None (transport error upstream); callers
+    translate that into the STATE-level "(unavailable …)" literal.
+
+    The Equipment block is toggleable for A/B comparison — see
+    `_equipment_readout_enabled`. When off, the output matches the
+    pre-Equipment-block format (raw slot listing only).
+    """
+    if inv is None:
+        return None
+    lines: list[str] = []
+    if _equipment_readout_enabled():
+        lines.extend(_render_equipment(inv))
+        lines.append("")
+    lines.append("Current inventory:")
+    main = inv.get("main") or []
     if main:
         for slot in main:
             slot_num = slot.get("slot", "?")
@@ -608,14 +701,17 @@ def _fetch_inventory() -> str | None:
             lines.append(f"  slot {slot_num}: {count}x {item_id}")
     else:
         lines.append("  (empty)")
-
     offhand = inv.get("offhand")
     if offhand:
         item_id = offhand.get("id", "<?unknown>")
         count = offhand.get("count", 1)
         lines.append(f"  offhand: {count}x {item_id}")
-
     return "\n".join(lines)
+
+
+def _fetch_inventory() -> str | None:
+    """Fetch current inventory and render for the prompt. None on transport error."""
+    return _format_inventory(_inventory_raw())
 
 
 def _build_state_chunk(
@@ -947,6 +1043,7 @@ def run(
             "model": model,
             "player": _PLAYER_NAME,
             "started_at": time.time(),
+            "equipment_readout": _equipment_readout_enabled(),
         }
         if wurst_report is not None:
             header["wurst_preflight"] = {
@@ -1243,7 +1340,7 @@ def run(
         stats_raw = _stats_raw()
         inv_raw = _inventory_raw()
         stats_str = _fetch_stats()
-        inv_str = _fetch_inventory()
+        inv_str = _format_inventory(inv_raw)
         smelts_str = _fetch_smelts()
         shelter_str = _poll_shelter_watch()
         if stats_str:
