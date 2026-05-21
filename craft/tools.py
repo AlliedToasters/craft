@@ -154,16 +154,6 @@ TOOLS = [
                         "type": "integer",
                         "description": "Number of additional logs to mine (capped at 10).",
                     },
-                    "fair": {
-                        "type": "boolean",
-                        "description": (
-                            "If true, use BLIND TUNNELING (no chunk-wide target "
-                            "search): dig a 1×2 corridor forward (player yaw) and "
-                            "stop when delta acquired. For wood, this only works "
-                            "if you're already adjacent to a tree — usually leave "
-                            "false. Default: false."
-                        ),
-                    },
                 },
                 "required": ["quantity"],
             },
@@ -1252,6 +1242,17 @@ def _handle_mine_delta(
     """
     delta = min(int(args.get("quantity", 1)), MAX_QUANTITY)
     fair = bool(args.get("fair", False))
+    # Substrate-level override: `CRAFT_MINE_FORCE_XRAY=1` forces fair=False
+    # (baritone x-ray) regardless of the agent's arg. mine_stone is exempt
+    # because baritone /mine stone picks pathological deep targets — see
+    # handle_mine_stone's fair=True force.
+    if (
+        os.environ.get("CRAFT_MINE_FORCE_XRAY", "").lower() in ("1", "true", "yes")
+        and label != "mine_stone"
+    ):
+        if fair:
+            print(f"  [{label}] CRAFT_MINE_FORCE_XRAY=1 → overriding fair=True → False", flush=True)
+        fair = False
     if fair and fair_miner is None:
         fair = False  # no fair impl registered; silent fall-through
     before = _count_inventory_items(drops)
@@ -1287,16 +1288,25 @@ def _handle_mine_delta(
 
 
 def handle_mine_wood(args: dict) -> str:
+    # mine_wood FORCES baritone x-ray (fair=False) regardless of agent arg.
+    # Trees are trivially visible to a human player ("spot a tree, run to
+    # it") — modeling that as blind tunneling is a worse substrate than
+    # vision. Decision 2026-05-20 after observing 13% historical fair=true
+    # rate on mine_wood: any non-zero rate is substrate-induced
+    # mis-modelling, not a useful capability.
+    args = {**args, "fair": False}
     return _handle_mine_delta("mine_wood", args, LOG_DROPS, mine_any_log,
                               fair_miner=tunnel_for_logs)
 
 
 def handle_mine_stone(args: dict) -> str:
     # mine_stone FORCES fair-mode (blind tunnel at player's current y).
-    # User decision 2026-05-15: baritone's chunk-wide /mine for stone picks
-    # pathological deep targets — agents shouldn't even have the option to
-    # use it. Other ores keep the toggle since their rare/sparse drops
-    # genuinely benefit from baritone's chunk-scan.
+    # User decision 2026-05-15: baritone's "nearest stone block" path leads
+    # agents to dig straight down through dirt at their current xz column,
+    # ignoring stone outcroppings trivially visible nearby. The right move
+    # is descend() first then 1×2 forward — which is exactly what fair=True
+    # does. Other ores keep the toggle / get force-xray since their rare,
+    # hidden drops genuinely benefit from baritone's chunk-scan.
     args = {**args, "fair": True}
     return _handle_mine_delta("mine_stone", args, STONE_DROPS, mine_any_stone,
                               fair_miner=tunnel_for_stone)

@@ -20,6 +20,10 @@ QWEN="hf.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF:F16"
 export CRAFT_SCOUT_FANOUT_MODEL="$QWEN"
 export CRAFT_SCOUT_UNIFY_MODEL="$QWEN"
 export CRAFT_LOOK_AROUND_MAX_RADIUS=1
+# 2026-05-20: force baritone x-ray on iron/coal/diamond — qwen historically
+# picks fair=true (blind branch-mine) on 33% of iron and 95% of diamond
+# calls. mine_stone is exempt (forces fair=true tool-side already).
+export CRAFT_MINE_FORCE_XRAY=1
 
 TODAY=$(date '+%Y%m%d')
 OUT="results/rolling-${TODAY}"

@@ -15,6 +15,12 @@ mkdir -p "$OUT"
 export CRAFT_SCOUT_FANOUT_MODEL="$QWEN"
 export CRAFT_SCOUT_UNIFY_MODEL="$QWEN"
 export CRAFT_LOOK_AROUND_MAX_RADIUS=1
+# 2026-05-20: audit of ~440 rollouts showed qwen picks fair=true on 33% of
+# mine_iron calls and 95% of mine_diamond. fair=true = blind tunneling
+# (model imitating human branch-mining without x-ray) — strictly worse
+# than baritone's chunk-scan on our substrate. Force x-ray for ores.
+# mine_stone exempt (it forces fair=true tool-side; depth is the trap).
+export CRAFT_MINE_FORCE_XRAY=1
 
 NWAVES="${NWAVES:-5}"
 
