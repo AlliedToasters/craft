@@ -830,7 +830,14 @@ def _inventory_raw() -> dict | None:
 
 
 def _inventory_compact(inv: dict | None) -> dict[str, int]:
-    """Flatten /inventory main+offhand into {item_id: total_count}."""
+    """Flatten /inventory main+offhand+armor into {item_id: total_count}.
+
+    The `armor` slot dict ({head,chest,legs,feet} -> {id,count} | None)
+    must be included — equipped armor is the natural state we want
+    predicates (e.g. M2_diamond_goal) to recognize, and worn pieces are
+    NOT mirrored in `main`. Original implementation dropped `armor` on
+    the floor; reproduced via `--starting-loadout iron_armored` smoke.
+    """
     if not inv:
         return {}
     out: dict[str, int] = {}
@@ -841,6 +848,11 @@ def _inventory_compact(inv: dict | None) -> dict[str, int]:
     oh = inv.get("offhand")
     if oh and oh.get("id"):
         out[oh["id"]] = out.get(oh["id"], 0) + int(oh.get("count", 1))
+    armor = inv.get("armor") or {}
+    if isinstance(armor, dict):
+        for piece in armor.values():
+            if isinstance(piece, dict) and piece.get("id"):
+                out[piece["id"]] = out.get(piece["id"], 0) + int(piece.get("count", 1))
     return out
 
 
@@ -1020,22 +1032,31 @@ def _apply_setup(
     *,
     start_phase: str,
     random_spawn_range: int,
+    starting_loadout: str = "none",
 ) -> dict | None:
-    """Pre-rollout setup: random TP, time reset, heal, clean inventory.
+    """Pre-rollout setup: random TP, time reset, heal, clean inventory,
+    optional starting loadout.
 
     Mirrors e2e/stress_test_shelter.py's per-iter setup so agent rollouts have
     the same baseline as substrate stress tests. Skipped entirely when
-    start_phase='none' AND random_spawn_range=0 (legacy behavior).
+    start_phase='none' AND random_spawn_range=0 AND starting_loadout='none'.
 
     Returns the Wurst pre-flight report (or None if skipped) so the caller
     can log it into the JSONL header — the rollout's behavior is meaningfully
     different depending on which Wurst hacks were actually on.
     """
-    if start_phase == "none" and random_spawn_range == 0:
+    if (
+        start_phase == "none"
+        and random_spawn_range == 0
+        and starting_loadout == "none"
+    ):
         return None
 
-    print(f"[setup] start_phase={start_phase} random_spawn_range={random_spawn_range}",
-          flush=True)
+    print(
+        f"[setup] start_phase={start_phase} random_spawn_range={random_spawn_range}"
+        f" starting_loadout={starting_loadout}",
+        flush=True,
+    )
 
     # Peaceful wipes any lingering hostiles so the agent starts clean.
     set_difficulty("peaceful", server_cmd_base=_SERVER_CMD_BASE)
@@ -1078,6 +1099,24 @@ def _apply_setup(
         wurst_report["autodrop"] = autodrop_report
     else:
         wurst_report["autodrop"] = {"ok": None, "tier": "off", "drop_count": 0}
+
+    # Starting loadout (loaded rollouts): materialize a deterministic
+    # high-tier inventory state via MC commands. Applied LAST so the
+    # AutoDrop tier-keep policy is already in place — iron+gold+diamond
+    # items are in ALWAYS_KEEP and won't be auto-dropped.
+    if starting_loadout != "none":
+        from craft.loadouts import apply_loadout
+        print(f"[setup] applying loadout {starting_loadout!r}", flush=True)
+        loadout_report = apply_loadout(
+            starting_loadout,
+            player_name=_PLAYER_NAME,
+            server_cmd_base=_SERVER_CMD_BASE,
+        )
+        wurst_report["loadout"] = {
+            "name": loadout_report["name"],
+            "ok": loadout_report["ok"],
+            "steps": len(loadout_report["steps"]),
+        }
     return wurst_report
 
 
@@ -1087,10 +1126,15 @@ def run(
     *,
     start_phase: str = "none",
     random_spawn_range: int = 0,
+    starting_loadout: str = "none",
     jsonl_path: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> None:
-    wurst_report = _apply_setup(start_phase=start_phase, random_spawn_range=random_spawn_range)
+    wurst_report = _apply_setup(
+        start_phase=start_phase,
+        random_spawn_range=random_spawn_range,
+        starting_loadout=starting_loadout,
+    )
     prompt = GOAL_PROMPTS.get(goal)
     if prompt is None:
         raise ValueError(f"unknown goal {goal!r}; valid: {sorted(GOAL_PROMPTS)}")
@@ -1116,6 +1160,7 @@ def run(
             "_type": "header",
             "goal": goal, "max_turns": max_turns,
             "start_phase": start_phase, "random_spawn_range": random_spawn_range,
+            "starting_loadout": starting_loadout,
             "model": model,
             "player": _PLAYER_NAME,
             "started_at": time.time(),
@@ -1613,6 +1658,16 @@ if __name__ == "__main__":
     ap.add_argument("--random-spawn-range", type=int, default=20000,
                     help="TP player to a random xz offset (±N from current pos, drop y=100); "
                          "default 20000 for broad biome sampling, 0 to disable")
+    # Loaded-rollouts capability: boot the agent into a deterministic
+    # high-tier state (e.g. full iron armor equipped) via MC commands so
+    # downstream features (M2 firing, diamond descent) are testable in a
+    # 2-turn smoke rather than a 30-min organic survival run.
+    from craft.loadouts import LOADOUTS as _LOADOUTS
+    ap.add_argument("--starting-loadout",
+                    choices=["none"] + sorted(_LOADOUTS),
+                    default="none",
+                    help="apply a named pre-set inventory loadout after spawn "
+                         f"(presets: {sorted(_LOADOUTS)})")
     ap.add_argument("--jsonl-out", default=None,
                     help="write per-turn JSONL to PATH (default: results/rollout-<goal>-<ts>.jsonl; '' to disable)")
     ap.add_argument("--model", default=DEFAULT_MODEL,
@@ -1624,6 +1679,7 @@ if __name__ == "__main__":
         goal=args.goal,
         start_phase=args.start_phase,
         random_spawn_range=args.random_spawn_range,
+        starting_loadout=args.starting_loadout,
         jsonl_path=args.jsonl_out,
         model=args.model,
     )

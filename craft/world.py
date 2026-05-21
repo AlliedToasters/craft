@@ -103,3 +103,52 @@ def set_time(
     """Set MC time-of-day. Accepts a phase name or an explicit tick."""
     ticks = resolve_phase_ticks(phase)
     return _cmd(server_cmd_base, f"time set {ticks}")
+
+
+# Inventory mutation primitives. Used by the loaded-rollout system
+# (craft/loadouts.py) to materialize a deterministic starting state
+# (full iron armor + tools, etc.) without grinding for it. /give is
+# not idempotent — repeated calls stack counts. /clear and /item replace
+# ARE idempotent.
+
+ArmorSlot = Literal["head", "chest", "legs", "feet"]
+
+
+def clear_inventory(
+    *,
+    player_name: str = PLAYER_NAME,
+    server_cmd_base: str = SERVER_CMD_BASE,
+) -> dict:
+    """Empty player inventory including armor + offhand. Idempotent."""
+    return _cmd(server_cmd_base, f"clear {player_name}")
+
+
+def give_item(
+    item_id: str,
+    count: int = 1,
+    *,
+    player_name: str = PLAYER_NAME,
+    server_cmd_base: str = SERVER_CMD_BASE,
+) -> dict:
+    """Add an item to the player's main inventory. NOT idempotent — call
+    once per loadout step.
+    """
+    return _cmd(server_cmd_base, f"give {player_name} {item_id} {count}")
+
+
+def equip_armor_slot(
+    slot: ArmorSlot,
+    item_id: str,
+    count: int = 1,
+    *,
+    player_name: str = PLAYER_NAME,
+    server_cmd_base: str = SERVER_CMD_BASE,
+) -> dict:
+    """Place an item directly into one of the player's equipped armor
+    slots, bypassing the inventory. Idempotent — replaces whatever was
+    there. Use slots 'head'/'chest'/'legs'/'feet'.
+    """
+    return _cmd(
+        server_cmd_base,
+        f"item replace entity {player_name} armor.{slot} with {item_id} {count}",
+    )

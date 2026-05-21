@@ -20,7 +20,7 @@ milestones.check. These tests pin the contract.
 import pytest
 
 from craft.agent import _inventory_compact
-from craft.milestones import Milestones, _has
+from craft.milestones import M1, M2, Milestone, Milestones, _has
 
 
 # Sample raw shape exactly as homunculus's /inventory returns it — captured
@@ -75,6 +75,77 @@ class TestInventoryCompact:
 
     def test_none_inventory(self):
         assert _inventory_compact(None) == {}
+
+    # ---- Regression 2026-05-20: armor slot was being dropped ----
+    # `_inventory_compact` originally flattened only main + offhand, so
+    # equipped armor (head/chest/legs/feet — the natural state we care
+    # about) was invisible to predicates like M2_diamond_goal. Found via
+    # `--starting-loadout iron_armored` smoke (M2 didn't fire despite the
+    # agent literally wearing iron armor). These tests pin the fix.
+
+    def test_includes_armor_slot_single(self):
+        raw = {
+            "main": [],
+            "offhand": None,
+            "armor": {
+                "head": {"id": "minecraft:iron_helmet", "count": 1},
+                "chest": None, "legs": None, "feet": None,
+            },
+        }
+        compact = _inventory_compact(raw)
+        assert compact["minecraft:iron_helmet"] == 1
+
+    def test_includes_full_armor_set(self):
+        raw = {
+            "main": [],
+            "offhand": None,
+            "armor": {
+                "head":  {"id": "minecraft:iron_helmet", "count": 1},
+                "chest": {"id": "minecraft:iron_chestplate", "count": 1},
+                "legs":  {"id": "minecraft:iron_leggings", "count": 1},
+                "feet":  {"id": "minecraft:iron_boots", "count": 1},
+            },
+        }
+        compact = _inventory_compact(raw)
+        for piece in (
+            "minecraft:iron_helmet", "minecraft:iron_chestplate",
+            "minecraft:iron_leggings", "minecraft:iron_boots",
+        ):
+            assert compact[piece] == 1, f"{piece} missing from compact view"
+
+    def test_armor_none_entries_safe(self):
+        """Empty armor slots come back as None; must not crash _inventory_compact."""
+        raw = {
+            "main": [{"id": "minecraft:dirt", "count": 5, "slot": 0}],
+            "offhand": None,
+            "armor": {"head": None, "chest": None, "legs": None, "feet": None},
+        }
+        compact = _inventory_compact(raw)
+        assert compact == {"minecraft:dirt": 5}
+
+    def test_missing_armor_key_safe(self):
+        """Older homunculus responses or tests might omit the `armor` key
+        entirely. Don't crash, just skip it."""
+        raw = {
+            "main": [{"id": "minecraft:dirt", "count": 5, "slot": 0}],
+            "offhand": None,
+        }
+        compact = _inventory_compact(raw)
+        assert compact == {"minecraft:dirt": 5}
+
+    def test_armor_count_sums_with_main(self):
+        """Edge case: same item id worn AND in main — counts should sum.
+        (You can hold a helmet in main while wearing one.)"""
+        raw = {
+            "main": [{"id": "minecraft:iron_helmet", "count": 2, "slot": 0}],
+            "offhand": None,
+            "armor": {
+                "head": {"id": "minecraft:iron_helmet", "count": 1},
+                "chest": None, "legs": None, "feet": None,
+            },
+        }
+        compact = _inventory_compact(raw)
+        assert compact["minecraft:iron_helmet"] == 3
 
 
 class TestMilestonesAgainstCompactedInventory:
@@ -132,3 +203,53 @@ class TestMilestonesAgainstCompactedInventory:
             "inv_raw directly."
         )
         assert event.name == "M1_iron_goal"
+
+    def test_m2_fires_with_full_armor_via_raw_shape(self):
+        """End-to-end regression for the armor-slot bug.
+
+        Boot the homunculus-shaped inventory with full iron armor in the
+        `armor` slot (the natural state — equipped, NOT in main). Run it
+        through _inventory_compact then through Milestones.check with M2
+        in the chain. M2 must fire on the first eligible turn.
+
+        Pre-fix: this would silently NOT fire — _inventory_compact dropped
+        the armor key so the predicate saw an empty inv. Caught in 33s by
+        the `--starting-loadout iron_armored` smoke (2026-05-20).
+        """
+        # Spawn turn: empty armor (the natural pre-iron state). M2 should
+        # NOT fire here.
+        raw_empty = {
+            "main": [],
+            "offhand": None,
+            "armor": {"head": None, "chest": None, "legs": None, "feet": None},
+        }
+        # Post-craft turn: full iron armor equipped (the test condition).
+        raw_full = {
+            "main": [
+                {"id": "minecraft:iron_pickaxe", "count": 1, "slot": 0},
+                {"id": "minecraft:iron_sword", "count": 1, "slot": 1},
+            ],
+            "offhand": None,
+            "armor": {
+                "head":  {"id": "minecraft:iron_helmet", "count": 1},
+                "chest": {"id": "minecraft:iron_chestplate", "count": 1},
+                "legs":  {"id": "minecraft:iron_leggings", "count": 1},
+                "feet":  {"id": "minecraft:iron_boots", "count": 1},
+            },
+        }
+        ms = Milestones(milestones=[M2])
+        # Spawn anchor — no fire (empty armor).
+        e0 = ms.check(
+            {"day_count": 0, "day_ticks": 0}, _inventory_compact(raw_empty), turn=1,
+        )
+        assert e0 is None, "M2 should not fire on empty-armor spawn turn"
+        # Armor equipped — M2 fires.
+        event = ms.check(
+            {"day_count": 0, "day_ticks": 100}, _inventory_compact(raw_full), turn=2,
+        )
+        assert event is not None and event.name == "M2_diamond_goal", (
+            "M2 must fire when the homunculus inventory has all four iron "
+            "armor pieces in `armor` slots (the equipped state). If this "
+            "fails, _inventory_compact has regressed to dropping the "
+            "`armor` key — see commit history for context."
+        )
