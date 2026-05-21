@@ -615,6 +615,73 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "cook_meat",
+            "description": (
+                "Cook raw meat in a furnace. Composes: place furnace if "
+                "none placed → load raw meat + fuel → wait for cook (~10s "
+                "per item) → walk back to furnace → collect cooked output. "
+                "One call, blocks until cooked meat is in inventory. "
+                "Requires raw meat (beef/porkchop/mutton/chicken/rabbit) + "
+                "fuel (coal/charcoal/any wood) in inventory; 8 cobblestone "
+                "if no furnace placed yet. AutoEat will consume the cooked "
+                "output when food drops. Returns 'cooked Nx cooked_<meat>' "
+                "on success."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "meat": {
+                        "type": "string",
+                        "description": (
+                            "Optional raw meat to cook (beef/porkchop/mutton/"
+                            "chicken/rabbit). Omit to auto-pick the first "
+                            "raw meat found in inventory. We add minecraft: "
+                            "prefix automatically."
+                        ),
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Optional count cap (default: cook all of that meat type in inventory, max 8 per call).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hunt_passive",
+            "description": (
+                "Hunt the nearest passive mob (cow/pig/sheep/chicken/rabbit) "
+                "for food. Scans within radius blocks for passives, paths to "
+                "the nearest one, and the sword auto-kills it (KillAura's "
+                "passive filter is enabled for the duration of the call, "
+                "then restored). Drops auto-pickup as you stand on them. "
+                "Returns 'killed N, gained {drops}' on success or "
+                "'no_passives_in_range' if none found. Requires any sword "
+                "in inventory for reliable one-shot kills. If no passives "
+                "are nearby, try travel() first to reach a plains/savanna "
+                "biome where they spawn."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "radius": {
+                        "type": "integer",
+                        "description": (
+                            "Search radius in blocks. Default 32, max 64. "
+                            "Larger radius = more travel time."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -696,6 +763,159 @@ def _sleep_raw(max_radius: int = 6) -> dict:
     """
     print(f"  [bed/sleep] requesting sleep (max_radius={max_radius})...", flush=True)
     return _post_homunculus("/bed/sleep", {"max_radius": max_radius}, timeout=10.0)
+
+
+# ---- hunt_passive helpers --------------------------------------------------
+
+# Passive mob species the hunt primitive scans for. Order is the
+# tie-break order when multiple species are at identical distance
+# (cows first → they're the highest-yield food per kill: 2 raw_beef +
+# leather), chickens last (small drops, harder to hit, flee less).
+_HUNT_SPECIES: tuple[str, ...] = (
+    "minecraft:cow",
+    "minecraft:pig",
+    "minecraft:sheep",
+    "minecraft:rabbit",
+    "minecraft:chicken",
+)
+
+# Items that count as a "drop" — used to detect kill success via
+# inventory delta. Includes hides/wool/feathers because the agent may
+# kill a sheep but not pick up the meat if it landed under wool, etc.
+# Any item in this set increasing → a kill happened.
+_HUNT_DROP_ITEMS: frozenset[str] = frozenset({
+    # Meats (raw + cooked; cooked covers fire-aspect / on-fire kills)
+    "minecraft:beef", "minecraft:cooked_beef",
+    "minecraft:porkchop", "minecraft:cooked_porkchop",
+    "minecraft:mutton", "minecraft:cooked_mutton",
+    "minecraft:chicken", "minecraft:cooked_chicken",
+    "minecraft:rabbit", "minecraft:cooked_rabbit",
+    # Byproducts
+    "minecraft:leather",
+    "minecraft:feather",
+    "minecraft:rabbit_hide", "minecraft:rabbit_foot",
+    "minecraft:white_wool", "minecraft:brown_wool", "minecraft:black_wool",
+    "minecraft:gray_wool", "minecraft:light_gray_wool", "minecraft:pink_wool",
+})
+
+# Wurst KillAura's checkbox setting that excludes passive mobs from
+# its target list. Best-guess name based on Wurst's display-name
+# convention ("Filter <category>"). If wrong, the substrate will surface
+# success=False + reason="setting_not_found" (or similar) on the toggle
+# call — the handler logs but does NOT abort, since KillAura may still
+# attack passives in some configurations.
+_KILLAURA_PASSIVE_FILTER_SETTING = "Filter passive mobs"
+
+
+def _scan_entities_raw(
+    entity_type: str, *, radius: int = 32, limit: int = 16,
+) -> list[dict]:
+    """GET /scan_entities for one species. Returns [] on error or empty result."""
+    params = {"type": entity_type, "radius": radius, "limit": limit}
+    body = _get_homunculus("/scan_entities", params=params, timeout=4.0)
+    if body.get("success") is False:
+        return []
+    return body.get("entities", []) or []
+
+
+def _killaura_attack_passives(*, on: bool) -> dict:
+    """Toggle whether KillAura attacks passive mobs.
+
+    Wurst Filter semantics are EXCLUSION: setting=True means "filter
+    out" (don't attack); setting=False means "include" (attack). So
+    on=True → setting=False; on=False → setting=True (restore default).
+    """
+    from craft.wurst import set_setting_value
+    return set_setting_value(
+        "KillAura", _KILLAURA_PASSIVE_FILTER_SETTING, not on,
+    )
+
+
+def _inventory_drop_counts() -> dict[str, int]:
+    """Sum counts of hunt-relevant drop items currently in inventory.
+
+    Returns {item_id: count} restricted to _HUNT_DROP_ITEMS. Used as a
+    before/after delta to detect kill + pickup. Returns {} on read failure
+    (transport_error) — callers should treat that as "no observable change"
+    rather than retrying, since polling continues at the outer loop.
+    """
+    inv = _get_homunculus("/inventory")
+    if inv.get("success") is False:
+        return {}
+    out: dict[str, int] = {}
+    for slot in inv.get("main", []) or []:
+        item_id = slot.get("id")
+        if item_id in _HUNT_DROP_ITEMS:
+            out[item_id] = out.get(item_id, 0) + slot.get("count", 0)
+    offhand = inv.get("offhand")
+    if offhand and offhand.get("id") in _HUNT_DROP_ITEMS:
+        out[offhand["id"]] = out.get(offhand["id"], 0) + offhand.get("count", 0)
+    return out
+
+
+def _nearest_passive(radius: int) -> tuple[dict, str] | None:
+    """Scan all hunt species in parallel-by-blocking, return (entity, type)
+    of the nearest. None if no passives found.
+
+    Distance comes from each scan_entities entry's distance field if
+    present; otherwise computed from x/y/z. _HUNT_SPECIES ordering is
+    the tie-breaker.
+    """
+    best: tuple[dict, str, float] | None = None  # (entity, type, dist)
+    for species in _HUNT_SPECIES:
+        for ent in _scan_entities_raw(species, radius=radius, limit=8):
+            d = ent.get("distance")
+            if not isinstance(d, (int, float)):
+                continue
+            if best is None or d < best[2]:
+                best = (ent, species, float(d))
+    if best is None:
+        return None
+    return (best[0], best[1])
+
+
+# ---- cook_meat helpers -----------------------------------------------------
+
+# Raw meat species the cook primitive recognizes. Order is the priority
+# for "what should I cook?" when no `meat` arg is given. Beef first
+# (highest yield per item — 8 food + 12.8 sat cooked, vs raw_chicken's
+# 6 + 7.2). Rabbit + chicken last; rabbit drops rarely, chicken is
+# poisonous when raw so cooking it is highest leverage but less common.
+_COOKABLE_MEATS: tuple[str, ...] = (
+    "minecraft:beef",
+    "minecraft:porkchop",
+    "minecraft:mutton",
+    "minecraft:rabbit",
+    "minecraft:chicken",
+)
+
+# Furnace fuel items the agent might have. Coal/charcoal are 8 items
+# per unit; any wood-tier item is 1-1.5 items per unit. We just need to
+# know SOMETHING burnable exists; /smelt picks the actual fuel.
+_COOK_FUEL_ITEMS: frozenset[str] = frozenset({
+    "minecraft:coal", "minecraft:charcoal",
+    "minecraft:oak_log", "minecraft:birch_log", "minecraft:spruce_log",
+    "minecraft:jungle_log", "minecraft:acacia_log", "minecraft:dark_oak_log",
+    "minecraft:cherry_log", "minecraft:mangrove_log",
+    "minecraft:oak_planks", "minecraft:birch_planks", "minecraft:spruce_planks",
+    "minecraft:jungle_planks", "minecraft:acacia_planks", "minecraft:dark_oak_planks",
+    "minecraft:cherry_planks", "minecraft:mangrove_planks",
+    "minecraft:stick",
+})
+
+
+def _pick_raw_meat() -> tuple[str, int] | None:
+    """Return (meat_id, count) for the first cookable raw meat present.
+
+    Order follows _COOKABLE_MEATS (beef > porkchop > mutton > rabbit > chicken).
+    Returns None if no raw meat in inventory. Uses the existing
+    _inventory_counts() (defined later in this module) for aggregation.
+    """
+    counts = _inventory_counts()
+    for meat in _COOKABLE_MEATS:
+        if counts.get(meat, 0) > 0:
+            return meat, counts[meat]
+    return None
 
 
 def _smelt_raw(input_item: str, count: int, fuel: str | None = None) -> dict:
@@ -3121,6 +3341,273 @@ def handle_sleep_in_bed(args: dict) -> str:
     return f"FAILED: sleep timed out after {_SLEEP_TIMEOUT_S:.0f}s (still sleeping)"
 
 
+_HUNT_DEFAULT_RADIUS = 32
+_HUNT_MAX_RADIUS = 64
+_HUNT_GOTO_TIMEOUT_S = 30          # path to mob; mobs wander so don't dawdle
+_HUNT_KILL_WAIT_S = 12.0           # post-arrival window for KillAura + pickup
+_HUNT_KILL_POLL_S = 1.0
+
+
+def handle_hunt_passive(args: dict) -> str:
+    """Pursue + kill the nearest passive mob via KillAura.
+
+    Flow:
+      1. Snapshot drop-item inventory counts.
+      2. Find nearest passive (cow/pig/sheep/rabbit/chicken) within radius.
+      3. Enable KillAura's passive-mob attack (toggle Filter false).
+      4. /baritone/goto to the mob's last-known position.
+      5. Wait up to _HUNT_KILL_WAIT_S for inventory delta to show drops.
+      6. Restore KillAura's Filter (true = exclude passives) — always,
+         even on failure paths. KillAura is shared infra; leaving the
+         filter off would silently affect downstream tools.
+      7. Return "killed N, gained {item: count, ...}" or a FAILED reason.
+
+    Composes from existing primitives only — no new homunculus endpoints.
+    """
+    import time as _time
+
+    radius = args.get("radius") if isinstance(args, dict) else None
+    if not isinstance(radius, int):
+        radius = _HUNT_DEFAULT_RADIUS
+    radius = max(4, min(_HUNT_MAX_RADIUS, radius))
+
+    before = _inventory_drop_counts()
+    print(f"  [hunt_passive] scanning radius={radius} for passives...", flush=True)
+    found = _nearest_passive(radius)
+    if found is None:
+        return (
+            f"no_passives_in_range (radius={radius}); no cow/pig/sheep/"
+            f"rabbit/chicken found — travel to plains or savanna and retry"
+        )
+    target, species = found
+    # /scan_entities returns coords as a `position: [x, y, z]` list, NOT
+    # bare x/y/z fields. The 2026-05-21 fan-out caught this — Haiku
+    # called hunt_passive 4× but every attempt failed at this point.
+    pos = target.get("position")
+    if not isinstance(pos, list) or len(pos) < 3:
+        return f"FAILED: nearest {species} had no valid position ({target})"
+    if not all(isinstance(v, (int, float)) for v in pos[:3]):
+        return f"FAILED: nearest {species} position values not numeric ({pos})"
+    tx, ty, tz = int(pos[0]), int(pos[1]), int(pos[2])
+    dist = target.get("distance")
+    print(
+        f"  [hunt_passive] nearest {species} at ({tx},{ty},{tz}) "
+        f"dist={dist} — engaging",
+        flush=True,
+    )
+
+    # Flip KillAura's passive filter off — i.e., attack passives. Log
+    # but don't abort on toggle failure; KillAura's default config may
+    # already allow it in some builds, or the setting name may differ.
+    toggle_on = _killaura_attack_passives(on=True)
+    if not toggle_on.get("success"):
+        print(
+            f"  [hunt_passive] WARN: couldn't enable passive filter "
+            f"({toggle_on.get('reason')} / {toggle_on.get('message','')[:80]}) "
+            f"— proceeding; KillAura may not attack passives",
+            flush=True,
+        )
+
+    try:
+        goto_res = _baritone_goto(
+            tx, ty, tz,
+            timeout_seconds=_HUNT_GOTO_TIMEOUT_S,
+            arrival_tolerance=2,
+        )
+        goto_ok = bool(goto_res.get("success"))
+        if not goto_ok:
+            print(
+                f"  [hunt_passive] goto returned non-success: "
+                f"{goto_res.get('reason','?')} / {goto_res.get('message','')[:80]}",
+                flush=True,
+            )
+
+        # Wait for KillAura to do its thing + drops to fly into inventory.
+        # Poll inventory rather than scan_entities — the mob may already
+        # be dead by the time we arrive (KillAura works at range during
+        # travel) and drops are the authoritative "kill happened" signal.
+        t0 = _time.time()
+        last_delta_total = 0
+        while _time.time() - t0 < _HUNT_KILL_WAIT_S:
+            _time.sleep(_HUNT_KILL_POLL_S)
+            after = _inventory_drop_counts()
+            delta = {
+                k: after.get(k, 0) - before.get(k, 0)
+                for k in set(after) | set(before)
+            }
+            delta = {k: v for k, v in delta.items() if v > 0}
+            delta_total = sum(delta.values())
+            if delta_total > last_delta_total:
+                last_delta_total = delta_total
+                # Continue polling briefly to catch multi-kill bursts;
+                # don't return on the very first item.
+        # Final read for the report
+        after = _inventory_drop_counts()
+    finally:
+        # Always restore. Even on exception paths — KillAura is shared
+        # infra; leaving Filter passive=off would silently affect every
+        # subsequent tool call.
+        toggle_off = _killaura_attack_passives(on=False)
+        if not toggle_off.get("success"):
+            print(
+                f"  [hunt_passive] WARN: couldn't restore passive filter "
+                f"({toggle_off.get('reason')} / "
+                f"{toggle_off.get('message','')[:80]}) — KillAura may still "
+                f"target passives in subsequent tools",
+                flush=True,
+            )
+
+    delta = {
+        k: after.get(k, 0) - before.get(k, 0)
+        for k in set(after) | set(before)
+    }
+    delta = {k: v for k, v in delta.items() if v > 0}
+    if not delta:
+        # Goto succeeded but no drops appeared. Either the mob fled out
+        # of KillAura range or the passive filter toggle didn't take.
+        reason = "no_drops_observed"
+        if not toggle_on.get("success"):
+            reason += " (passive filter toggle failed — likely root cause)"
+        return f"FAILED: {reason} after engaging {species} at ({tx},{ty},{tz})"
+
+    # Report drop tally sorted by count descending.
+    parts = ", ".join(
+        f"{c}x {item.split(':',1)[-1]}"
+        for item, c in sorted(delta.items(), key=lambda kv: -kv[1])
+    )
+    return f"hunted {species}: gained {parts}"
+
+
+_COOK_PER_CALL_CAP = 8        # one furnace slot fits 8 items, ~80s real time
+_COOK_NS_PREFIX = "minecraft:"
+
+
+def handle_cook_meat(args: dict) -> str:
+    """Cook raw meat in a furnace via the existing smelt + collect chain.
+
+    Composes:
+      1. Pick meat (arg or first cookable in inventory)
+      2. Verify fuel present (any of _COOK_FUEL_ITEMS); fail-fast if not
+      3. Call _smelt_raw — homunculus auto-places furnace from inventory
+         (or auto-crafts one from 8 cobblestone if not in inventory)
+      4. Call _collect_smelt_raw — walks to furnace + pulls cooked output
+
+    What this primitive ADDS over the existing smelt+collect_smelt pair:
+    - A name that maps to the LLM's mental verb ("cook" not "smelt")
+    - Default-meat-from-inventory ergonomics (no need to know specific id)
+    - One-call wraps both halves of the chain — substrate-thesis: the
+      compound chain isn't visible as a verb so models don't reach for it
+      (validated 2026-05-21: Haiku used hunt_passive 4× but never smelted
+      its raw_beef inventory in cook_kitchen fan-out).
+    """
+    # Single inventory read; everything below filters this snapshot.
+    inv_counts = _inventory_counts()
+
+    # Normalize meat arg
+    meat_arg = args.get("meat") if isinstance(args, dict) else None
+    if isinstance(meat_arg, str) and meat_arg:
+        meat = meat_arg if meat_arg.startswith(_COOK_NS_PREFIX) else _COOK_NS_PREFIX + meat_arg
+        if meat not in _COOKABLE_MEATS:
+            return (
+                f"FAILED: '{meat}' is not a cookable raw meat. "
+                f"Valid: {[m.split(':',1)[-1] for m in _COOKABLE_MEATS]}"
+            )
+        meat_in_inv = inv_counts.get(meat, 0)
+        if meat_in_inv == 0:
+            return f"FAILED: no {meat} in inventory to cook"
+    else:
+        # _pick_raw_meat reads inventory again — acceptable; one extra
+        # HTTP call beats duplicating the priority-loop logic.
+        picked = _pick_raw_meat()
+        if picked is None:
+            return (
+                "FAILED: no raw meat in inventory. Cookable items: "
+                f"{[m.split(':',1)[-1] for m in _COOKABLE_MEATS]}"
+            )
+        meat, meat_in_inv = picked
+
+    # Count cap. Smaller of (arg count, available, per-call cap).
+    requested = args.get("count") if isinstance(args, dict) else None
+    if isinstance(requested, int) and requested > 0:
+        count = min(requested, meat_in_inv, _COOK_PER_CALL_CAP)
+    else:
+        count = min(meat_in_inv, _COOK_PER_CALL_CAP)
+
+    # Fuel preflight. Smelt will fail downstream without fuel; fail-fast
+    # with a clearer message ("no_fuel" rather than a generic smelt error).
+    has_fuel = any(inv_counts.get(f, 0) > 0 for f in _COOK_FUEL_ITEMS)
+    if not has_fuel:
+        return (
+            "FAILED: no_fuel — need coal, charcoal, or any wood/planks "
+            "in inventory. Cooking requires fuel."
+        )
+
+    print(
+        f"  [cook_meat] cooking {count}x {meat}",
+        flush=True,
+    )
+
+    # Kick the smelt. /smelt auto-places the furnace if one isn't nearby
+    # (uses 8 cobblestone) — that's the substrate piece the LLM was
+    # missing when composing place+smelt manually.
+    smelt_res = _smelt_raw(meat, count)
+    if not smelt_res.get("success"):
+        return (
+            f"FAILED: smelt didn't start: "
+            f"{smelt_res.get('reason', 'unknown')} "
+            f"({smelt_res.get('message', '')[:120]})"
+        )
+
+    # Wait for the smelt to reach collectable status. /collect_smelt
+    # filters on status ∈ {ready, partial, stale} — items in `cooking`
+    # state aren't collectable yet. Without this wait, every cook_meat
+    # call would race ahead and return no_active_smelts (validated
+    # 2026-05-21 smoke v3).
+    import time as _time
+    eta = smelt_res.get("eta_seconds", count * 10)
+    deadline = _time.time() + eta + 30.0
+    poll_interval = 5.0
+    last_print = _time.time()
+    while _time.time() < deadline:
+        _time.sleep(poll_interval)
+        status_resp = _get_homunculus("/smelt_status")
+        smelts = (status_resp or {}).get("smelts") or []
+        ready = [s for s in smelts if s.get("status") in ("ready", "partial", "stale")]
+        if ready:
+            break
+        if _time.time() - last_print > 15.0:
+            statuses = [s.get("status") for s in smelts]
+            remaining = int(deadline - _time.time())
+            print(
+                f"  [cook_meat] still cooking (statuses={statuses}, "
+                f"~{remaining}s left)...",
+                flush=True,
+            )
+            last_print = _time.time()
+
+    # Block on collect — walks back to furnace + retrieves cooked output.
+    # /collect_smelt is the same primitive collect_smelt() exposes; it
+    # handles the goto + furnace-output extraction + 90s timeout for
+    # multi-stack cooks.
+    collect_res = _collect_smelt_raw()
+    if not collect_res.get("success"):
+        return (
+            f"FAILED: smelt started but collect failed: "
+            f"{collect_res.get('reason', 'unknown')} "
+            f"({collect_res.get('message', '')[:120]})"
+        )
+
+    # Successful collect — quantify by re-reading inventory delta on
+    # the cooked_* id. cooked_beef from beef, cooked_porkchop from
+    # porkchop, etc.
+    cooked_id = meat.replace(_COOK_NS_PREFIX, _COOK_NS_PREFIX + "cooked_", 1)
+    cooked_now = _inventory_counts().get(cooked_id, 0)
+    return (
+        f"cooked {count}x {cooked_id.split(':',1)[-1]} "
+        f"(now have {cooked_now} in inventory)"
+    )
+
+
 def handle_look_around(args: dict) -> str:
     from craft.scout import describe_neighborhood
 
@@ -3173,6 +3660,8 @@ HANDLERS = {
     "carve_alcove": handle_expand_burrow,
     "look_around": handle_look_around,
     "sleep_in_bed": handle_sleep_in_bed,
+    "hunt_passive": handle_hunt_passive,
+    "cook_meat": handle_cook_meat,
 }
 
 

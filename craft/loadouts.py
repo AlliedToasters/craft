@@ -27,13 +27,18 @@ A loadout spec is a dict with two keys:
 
 from __future__ import annotations
 
-from craft.config import PLAYER_NAME, SERVER_CMD_BASE
+import requests
+
+from craft.config import HOMUNCULUS_BASE, PLAYER_NAME, SERVER_CMD_BASE
 from craft.world import (
     ArmorSlot,
     clear_inventory,
     equip_armor_slot,
     give_item,
+    give_to_main_inv_slot,
     set_gamemode,
+    set_hunger,
+    summon_at,
 )
 
 
@@ -78,7 +83,112 @@ LOADOUTS: dict[str, dict] = {
             ("minecraft:torch",        8),
         ],
     },
+    # Hunt-capability isolation, deterministic variant: a pre-summoned ring
+    # of passive mobs (cow/pig/sheep/chicken) lands near the agent so the
+    # hunt_passive primitive has guaranteed targets in range. Paired with
+    # hunger=2 (foodLevel; saturation=0) so AutoEat triggers as soon as
+    # the agent cooks any drops, exposing whether the full hunt → cook
+    # → eat chain composes. No armor (capability test is for hunting,
+    # not survival ceiling).
+    "hunt_meadow": {
+        "pre_summon_herd": True,
+        "set_hunger": 2,
+        "armor": {},
+        "main": [
+            ("minecraft:stone_sword",  1),
+            ("minecraft:torch",        8),
+        ],
+    },
+    # Hunt-capability isolation, natural variant: no pre-summon. Tests
+    # combined skill (find herd in biome + hunt) — biome lottery is the
+    # confound, run multiple iterations to separate signal. Same hunger
+    # pressure + sword + torches as hunt_meadow so the two are directly
+    # comparable on the "did the agent try to hunt?" axis.
+    "hunt_wild": {
+        "pre_summon_herd": False,
+        "set_hunger": 2,
+        "armor": {},
+        "main": [
+            ("minecraft:stone_sword",  1),
+            ("minecraft:torch",        8),
+        ],
+    },
+    # Cooking-capability isolation: agent starts with raw meat + fuel +
+    # furnace in inventory, hunger=2 pressure, and must self-place the
+    # furnace and run the smelt → collect chain. Composes from existing
+    # primitives (place/smelt/collect_smelt). Tests whether the model
+    # reaches for the cook chain when the materials are right there —
+    # mirrors hunt_meadow's "everything ready, will the model invoke
+    # the verb?" pattern.
+    #
+    # Critical: raw meat goes in `main_inv_only` (slots 9+) NOT `main`
+    # (hotbar). Wurst's AutoEat only eats from hotbar — if raw beef
+    # lands in slot 0-8 via /give it gets consumed before the agent can
+    # cook (validated 2026-05-21 smoke: 8 raw beef gone by turn 13).
+    # Slots 9+ are still in inventory + visible to /inventory, but
+    # outside AutoEat's reach.
+    "cook_kitchen": {
+        "set_hunger": 2,
+        "armor": {},
+        "main": [
+            ("minecraft:coal",         8),   # 1 coal smelts 8 items → exact fuel match
+            ("minecraft:furnace",      1),
+            ("minecraft:stone_sword",  1),   # survival kit
+            ("minecraft:torch",        8),
+        ],
+        "main_inv_only": [
+            ("minecraft:beef",         8),   # raw beef — hidden from AutoEat
+        ],
+    },
 }
+
+
+# Pre-summon ring for hunt_meadow. 8 mobs across 4 species in four
+# clusters at ±20 blocks (N/E/S/W). Radius 20 puts the herd OUT of
+# KillAura's melee range (~5 blocks); the only ways for the agent to
+# engage are (a) deliberately call hunt_passive — which paths via
+# /baritone/goto — or (b) walk into a cluster while doing something
+# else. Radius < 32 keeps the herd inside hunt_passive's default scan
+# radius so the agent's first scan will see them.
+# Prior version used radius 5 (all 8 mobs adjacent) which let KillAura
+# instakill the entire herd before the agent's first turn — the
+# substrate fed the agent automatically and hunt_passive was never
+# called. See 2026-05-21 smoke findings for details.
+_HERD_RING: list[tuple[str, int, int]] = [
+    # N cluster (~20 blocks)
+    ("minecraft:cow",      0,  20),
+    ("minecraft:pig",      2,  20),
+    # E cluster
+    ("minecraft:sheep",   20,   0),
+    ("minecraft:chicken", 20,   2),
+    # S cluster
+    ("minecraft:cow",      0, -20),
+    ("minecraft:pig",     -2, -20),
+    # W cluster
+    ("minecraft:sheep",  -20,   0),
+    ("minecraft:chicken",-20,  -2),
+]
+
+
+def _fetch_player_pos(
+    homunculus_base: str, *, timeout: float = 4.0,
+) -> tuple[float, float, float] | None:
+    """GET /position from homunculus. Returns (x, y, z) or None on error.
+
+    Used by pre_summon_herd to place mobs relative to the agent's actual
+    spawn location (which is set by random_spawn upstream of apply_loadout,
+    so we can't precompute it).
+    """
+    try:
+        r = requests.get(f"{homunculus_base}/position", timeout=timeout)
+        r.raise_for_status()
+        body = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    x, y, z = body.get("x"), body.get("y"), body.get("z")
+    if not all(isinstance(v, (int, float)) for v in (x, y, z)):
+        return None
+    return (float(x), float(y), float(z))
 
 
 # Items given to the player during the pre_shelter step. handle_build_shelter
@@ -117,6 +227,48 @@ def apply_loadout(
         )
 
     report: dict = {"name": name, "steps": []}
+
+    # Optional pre-summon step: spawn a passive-mob ring around the player
+    # before clearing inventory + giving items. Runs first so the herd is
+    # nearby when the agent boots into survival. summon_at uses /summon
+    # via the server console — no homunculus changes needed.
+    if spec.get("pre_summon_herd"):
+        pos = _fetch_player_pos(HOMUNCULUS_BASE)
+        if pos is None:
+            print(
+                "[loadout] pre_summon_herd FAILED: couldn't fetch player position",
+                flush=True,
+            )
+            report["steps"].append({
+                "step": "pre_summon_herd",
+                "result": {"ok": False, "error": "position_fetch_failed"},
+            })
+        else:
+            px, py, pz = pos
+            ring_results: list[dict] = []
+            for entity_id, dx, dz in _HERD_RING:
+                res = summon_at(
+                    entity_id, px + dx, py, pz + dz,
+                    server_cmd_base=server_cmd_base,
+                )
+                ring_results.append({
+                    "entity": entity_id, "offset": [dx, dz], "result": res,
+                })
+            spawned_n = sum(1 for r in ring_results if r["result"].get("ok"))
+            print(
+                f"[loadout] pre_summon_herd: spawned {spawned_n}/{len(_HERD_RING)} "
+                f"mobs around ({px:.1f},{py:.1f},{pz:.1f})",
+                flush=True,
+            )
+            report["steps"].append({
+                "step": "pre_summon_herd",
+                "result": {
+                    "ok": spawned_n == len(_HERD_RING),
+                    "spawned": spawned_n,
+                    "total": len(_HERD_RING),
+                    "ring": ring_results,
+                },
+            })
 
     # Optional pre-shelter step: build a cobble box at the player's
     # current position before giving the rest of the inventory. Mirrors
@@ -204,6 +356,43 @@ def apply_loadout(
         )
         report["steps"].append({
             "step": "give", "item": item_id, "count": count, "result": res,
+        })
+
+    # Optional `main_inv_only` items — placed in main-inventory slots
+    # (9, 10, 11, ...) via /item replace entity. Used to hide items from
+    # Wurst's AutoEat (which only consumes hotbar items) and from any
+    # other hotbar-stuck consumer. Slot 9 is the first slot above the
+    # hotbar; we increment from there.
+    for i, (item_id, count) in enumerate(spec.get("main_inv_only") or []):
+        slot = 9 + i
+        if slot > 35:
+            # Main inv is 9-35 = 27 slots; loadouts shouldn't need that many
+            report["steps"].append({
+                "step": "give_main_inv", "item": item_id, "count": count,
+                "result": {"ok": False, "error": f"main inv slot {slot} out of range (max 35)"},
+            })
+            continue
+        res = give_to_main_inv_slot(
+            slot, item_id, count,
+            player_name=player_name, server_cmd_base=server_cmd_base,
+        )
+        report["steps"].append({
+            "step": "give_main_inv", "item": item_id, "count": count,
+            "slot": slot, "result": res,
+        })
+
+    # Optional hunger-pressure step. LAST so it doesn't get reset by a
+    # gamemode change (set_gamemode survival/creative refills foodLevel
+    # incidentally). saturation defaults to 0 — the hidden buffer would
+    # otherwise mask the foodLevel drop for several seconds.
+    hunger_level = spec.get("set_hunger")
+    if hunger_level is not None:
+        hres = set_hunger(
+            int(hunger_level),
+            player_name=player_name, server_cmd_base=server_cmd_base,
+        )
+        report["steps"].append({
+            "step": "set_hunger", "level": int(hunger_level), "result": hres,
         })
 
     report["ok"] = all(

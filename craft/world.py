@@ -152,3 +152,90 @@ def equip_armor_slot(
         server_cmd_base,
         f"item replace entity {player_name} armor.{slot} with {item_id} {count}",
     )
+
+
+def give_to_main_inv_slot(
+    slot: int,
+    item_id: str,
+    count: int = 1,
+    *,
+    player_name: str = PLAYER_NAME,
+    server_cmd_base: str = SERVER_CMD_BASE,
+) -> dict:
+    """Place an item directly into a specific main-inventory slot.
+
+    container slot indices in MC:
+      - 0-8: hotbar (visible at bottom; this is where Wurst's AutoEat
+        looks for food)
+      - 9-35: main inventory (3 rows × 9 cols, hidden when GUI closed)
+      - 36-39: armor (head/chest/legs/feet)
+      - 40: offhand
+    Use 9-35 to hide an item from AutoEat / hotbar-stuck tools. Idempotent
+    — replaces whatever was in the slot.
+
+    First user is the cook_kitchen loadout: raw meat must be hidden from
+    AutoEat or the agent's test materials get auto-consumed before they
+    cook (validated 2026-05-21 smoke).
+    """
+    return _cmd(
+        server_cmd_base,
+        f"item replace entity {player_name} container.{slot} "
+        f"with {item_id} {count}",
+    )
+
+
+def set_hunger(
+    level: int,
+    *,
+    saturation: float = 0.0,  # kept for API compat; effect drains it
+    player_name: str = PLAYER_NAME,
+    server_cmd_base: str = SERVER_CMD_BASE,
+) -> dict:
+    """Apply hunger pressure to drive foodLevel toward `level`.
+
+    Implementation gotcha: MC blocks `data merge entity <player>`
+    ("Unable to modify player data" in server log). Player NBT can't be
+    written via the data command. So we apply the Hunger effect instead
+    — it drains saturation, then food meter, over a few seconds.
+
+    **Peaceful difficulty freezes the food meter at 20** regardless of
+    Hunger effect strength. For this primitive to bite, the world must
+    be at easy/normal/hard difficulty. Callers using set_hunger in a
+    loadout should also set --difficulty easy or above.
+
+    `level` is approximate — Hunger drains toward 0. We pick amplifier
+    so the effect overcomes natural food gain (sprinting/jumping etc.):
+      - level≤3 (high pressure): amp=10
+      - level 4-10 (moderate):   amp=4
+      - level≥11:                no effect (no pressure)
+
+    saturation arg kept for API compat; ignored (effect handles it).
+    """
+    if level >= 11:
+        return {"ok": True, "skipped": f"level={level} ≥ 11 → no effect needed"}
+    amp = 10 if level <= 3 else 4
+    return _cmd(
+        server_cmd_base,
+        f"effect give {player_name} minecraft:hunger 600 {amp} true",
+    )
+
+
+def summon_at(
+    entity_id: str,
+    x: float, y: float, z: float,
+    *,
+    nbt: str = "",
+    server_cmd_base: str = SERVER_CMD_BASE,
+) -> dict:
+    """Spawn one entity at the given world coords.
+
+    `entity_id` is the full namespaced id (e.g. 'minecraft:cow').
+    `nbt` is optional — leave empty for vanilla spawn behavior. Mirrors
+    the pattern in craft/ambush.py (which uses the raw _server_cmd path
+    for its 17-point ring).
+    """
+    suffix = f" {nbt}" if nbt else ""
+    return _cmd(
+        server_cmd_base,
+        f"summon {entity_id} {x} {y} {z}{suffix}",
+    )

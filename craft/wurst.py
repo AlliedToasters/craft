@@ -106,6 +106,36 @@ def set_item_list(
         return {"success": False, "reason": "transport_error", "message": str(e)}
 
 
+def set_setting_value(
+    hack: str,
+    setting: str,
+    value,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    """POST /wurst/setting for a non-list setting (Checkbox/Slider/Enum).
+
+    Same endpoint as set_item_list but without an `op` field — homunculus
+    stores the value verbatim, no merge semantics. Returns the parsed
+    response dict; transport errors fold into the standard
+    {success: False, reason: "transport_error"} shape so callers can branch
+    uniformly.
+
+    First user is craft.tools.handle_hunt_passive, which flips KillAura's
+    "Filter passive mobs" checkbox false → attack → restore true.
+    """
+    try:
+        resp = requests.post(
+            f"{HOMUNCULUS_BASE}/wurst/setting",
+            json={"hack": hack, "setting": setting, "value": value},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"success": False, "reason": "transport_error", "message": str(e)}
+
+
 def seed_autodrop_from_tier(tier: str, *, verbose: bool = True) -> dict:
     """Push the autodrop policy's drop-list-for-tier into AutoDrop.Items.
 
