@@ -593,6 +593,28 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sleep_in_bed",
+            "description": (
+                "Sleep through the night in a bed. Places a bed from inventory "
+                "if none is within reach, then enters sleep. Blocks until you "
+                "wake (at dawn or if interrupted). While sleeping you are "
+                "INVINCIBLE and the world progresses — smelts finish, time "
+                "advances. If all players on the server are asleep, time skips "
+                "to dawn; otherwise you wait through the night safely. "
+                "Requires a *_bed item in inventory if no bed is placed near "
+                "you. Only works at night or during thunderstorms — will "
+                "fail-fast with 'not_night' during the day."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -655,6 +677,25 @@ def _place_at_raw(item: str, x: int, y: int, z: int) -> dict:
     return _post_homunculus(
         "/place_at", {"item": item, "x": x, "y": y, "z": z}, timeout=15.0,
     )
+
+
+def _place_bed_raw(item: str | None = None) -> dict:
+    """Place a bed near the player. If `item` is None, homunculus picks
+    any *_bed in inventory. Returns standard success/reason/message dict.
+    """
+    body: dict = {}
+    if item:
+        body["item"] = item
+    print(f"  [bed/place] requesting bed placement (item={item or 'any'})...", flush=True)
+    return _post_homunculus("/bed/place", body, timeout=10.0)
+
+
+def _sleep_raw(max_radius: int = 6) -> dict:
+    """Right-click the nearest bed (within `max_radius`) to enter sleep.
+    Returns standard success/reason/message dict.
+    """
+    print(f"  [bed/sleep] requesting sleep (max_radius={max_radius})...", flush=True)
+    return _post_homunculus("/bed/sleep", {"max_radius": max_radius}, timeout=10.0)
 
 
 def _smelt_raw(input_item: str, count: int, fuel: str | None = None) -> dict:
@@ -3000,6 +3041,86 @@ def handle_expand_burrow(args: dict) -> str:
     )
 
 
+_SLEEP_TIMEOUT_S = 720.0      # 12 min: longer than a vanilla MC night (~9.7 min)
+_SLEEP_POLL_S = 2.0
+_SLEEP_PRINT_EVERY_S = 30.0
+
+
+def handle_sleep_in_bed(args: dict) -> str:
+    """Sleep in a nearby bed; place one from inventory if none in range.
+
+    Composite: try /bed/sleep first; on no_bed_nearby / too_far_from_bed,
+    call /bed/place then retry /bed/sleep. Then block polling /stats.is_sleeping
+    until it flips false (wake at dawn or interrupted). Substrate-managed
+    wait — the agent's tool-call returns only after wake, which is the
+    natural completion point. See [[sleep-survival-value]] for why partial
+    sleep is still a win (invincibility window + world progresses).
+    """
+    import time as _time
+
+    sleep_res = _sleep_raw()
+    if not sleep_res.get("success"):
+        reason = sleep_res.get("reason")
+        if reason in ("no_bed_nearby", "too_far_from_bed"):
+            place_res = _place_bed_raw()
+            if not place_res.get("success"):
+                return (
+                    f"FAILED: couldn't place bed: "
+                    f"{place_res.get('reason', 'unknown')} "
+                    f"({place_res.get('message', '')})"
+                )
+            foot = place_res.get("foot")
+            print(f"  [sleep_in_bed] placed bed at {foot}, retrying sleep...", flush=True)
+            sleep_res = _sleep_raw()
+            if not sleep_res.get("success"):
+                return (
+                    f"FAILED: placed bed at {foot} but couldn't sleep: "
+                    f"{sleep_res.get('reason', 'unknown')} "
+                    f"({sleep_res.get('message', '')})"
+                )
+        else:
+            return (
+                f"FAILED: sleep failed: "
+                f"{reason} ({sleep_res.get('message', '')})"
+            )
+
+    bed_pos = sleep_res.get("bed")
+    ticks_start = sleep_res.get("day_ticks_at_sleep")
+    print(
+        f"  [sleep_in_bed] sleeping in bed at {bed_pos} "
+        f"(day_ticks={ticks_start}); polling for wake...",
+        flush=True,
+    )
+
+    t0 = _time.time()
+    last_print = t0
+    while _time.time() - t0 < _SLEEP_TIMEOUT_S:
+        _time.sleep(_SLEEP_POLL_S)
+        stats = _get_homunculus("/stats")
+        # Missing field → homunculus likely doesn't expose the new stats
+        # extension yet; surface the substrate gap rather than loop forever.
+        if "is_sleeping" not in stats:
+            return (
+                "FAILED: /stats response missing is_sleeping field — "
+                "homunculus may not support the bed/sleep API yet"
+            )
+        if not stats["is_sleeping"]:
+            elapsed = _time.time() - t0
+            ticks_end = stats.get("day_ticks", -1)
+            is_night = stats.get("is_night", False)
+            wake_kind = "interrupted" if is_night else "natural_dawn"
+            return (
+                f"slept {elapsed:.0f}s real, day_ticks "
+                f"{ticks_start} → {ticks_end} at bed {bed_pos} ({wake_kind})"
+            )
+        now = _time.time()
+        if now - last_print > _SLEEP_PRINT_EVERY_S:
+            print(f"  [sleep_in_bed] still asleep ({now - t0:.0f}s elapsed)", flush=True)
+            last_print = now
+
+    return f"FAILED: sleep timed out after {_SLEEP_TIMEOUT_S:.0f}s (still sleeping)"
+
+
 def handle_look_around(args: dict) -> str:
     from craft.scout import describe_neighborhood
 
@@ -3051,6 +3172,7 @@ HANDLERS = {
     "wall_in": handle_burrow,
     "carve_alcove": handle_expand_burrow,
     "look_around": handle_look_around,
+    "sleep_in_bed": handle_sleep_in_bed,
 }
 
 

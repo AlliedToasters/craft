@@ -33,6 +33,7 @@ from craft.world import (
     clear_inventory,
     equip_armor_slot,
     give_item,
+    set_gamemode,
 )
 
 
@@ -60,7 +61,37 @@ LOADOUTS: dict[str, dict] = {
             ("minecraft:torch",        32),
         ],
     },
+    # Sleep-capability isolation: agent is pre-sheltered (cobble box via
+    # handle_build_shelter) and holds a bed + stone_sword + survival kit.
+    # Paired with `--start-phase dusk`, this is the cleanest prerequisite
+    # condition for sleep_in_bed: safe spot already secured, bed in hand,
+    # KillAura+sword handles any leakage. Removes the shelter+combat
+    # confound from the sleep signal — failure modes left should be
+    # timing (not_night) or model-omission (didn't call the tool).
+    "dusk_bed": {
+        "pre_shelter": True,
+        "armor": {},
+        "main": [
+            ("minecraft:red_bed",      1),
+            ("minecraft:stone_sword",  1),
+            ("minecraft:cooked_beef",  8),
+            ("minecraft:torch",        8),
+        ],
+    },
 }
+
+
+# Items given to the player during the pre_shelter step. handle_build_shelter
+# pulls from inventory; cobblestone is the default tier-0 buildable, and
+# diamond tools let excavate chew through any block type (mirrors the
+# stress_test_shelter setup pattern — without these, excavate stalls on
+# stone/leaves and the build returns "stuck"). All cleared after the build.
+_PRE_SHELTER_GIVES = [
+    ("minecraft:cobblestone",      128),
+    ("minecraft:diamond_pickaxe",    1),
+    ("minecraft:diamond_shovel",     1),
+    ("minecraft:diamond_axe",        1),
+]
 
 
 def apply_loadout(
@@ -86,6 +117,71 @@ def apply_loadout(
         )
 
     report: dict = {"name": name, "steps": []}
+
+    # Optional pre-shelter step: build a cobble box at the player's
+    # current position before giving the rest of the inventory. Mirrors
+    # the stress_test_shelter setup pattern: temp creative → give
+    # build material → handle_build_shelter → survival. The shelter
+    # material is cleared along with everything else in the subsequent
+    # clear_inventory step, so the spec's `main` list is the *post-shelter*
+    # inventory verbatim.
+    if spec.get("pre_shelter"):
+        # Lazy import to avoid a craft.loadouts → craft.tools cycle
+        # (craft.tools imports a lot; craft.loadouts is on its hot path
+        # via apply_loadout-from-agent.py).
+        from craft.tools import handle_build_shelter
+
+        gm_res = set_gamemode(
+            "creative",
+            player_name=player_name, server_cmd_base=server_cmd_base,
+        )
+        report["steps"].append({"step": "pre_shelter_gm_creative", "result": gm_res})
+
+        for item_id, qty in _PRE_SHELTER_GIVES:
+            give_res = give_item(
+                item_id, qty,
+                player_name=player_name, server_cmd_base=server_cmd_base,
+            )
+            report["steps"].append({
+                "step": "pre_shelter_give",
+                "item": item_id, "count": qty, "result": give_res,
+            })
+
+        # Switch to survival before the build — matches stress_test_shelter's
+        # pattern and exercises the same code path the agent would experience.
+        gm_res2 = set_gamemode(
+            "survival",
+            player_name=player_name, server_cmd_base=server_cmd_base,
+        )
+        report["steps"].append({"step": "pre_shelter_gm_survival", "result": gm_res2})
+
+        # build_shelter returns a string. "shelter at (X,Y,Z); ..." on success,
+        # "ABORTED: ..." or "FAILED: ..." on different failure classes.
+        # Capture it but don't gate apply_loadout's overall ok on it — a
+        # failed build will manifest as the agent waking up to bare ground,
+        # which is the desired (visible) signal in JSONL.
+        try:
+            build_txt = handle_build_shelter({})
+            build_err = None
+        except Exception as e:
+            build_txt = ""
+            build_err = repr(e)
+        built_ok = not (
+            build_err
+            or build_txt.startswith("ABORTED")
+            or build_txt.startswith("FAILED")
+        )
+        # Surface to stdout so the agent's setup log captures pre_shelter
+        # success/failure — apply_loadout's return value is discarded by
+        # craft.agent, so without this print the build outcome is invisible.
+        status = "ok" if built_ok else "FAILED"
+        head = (build_txt or build_err or "<no output>").replace("\n", " | ")[:240]
+        print(f"[loadout] pre_shelter_build {status}: {head}", flush=True)
+        report["steps"].append({
+            "step": "pre_shelter_build",
+            "result": {"ok": built_ok, "text": build_txt[:240],
+                       "exception": build_err},
+        })
 
     clear_res = clear_inventory(
         player_name=player_name, server_cmd_base=server_cmd_base,

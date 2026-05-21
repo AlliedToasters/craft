@@ -1033,6 +1033,7 @@ def _apply_setup(
     start_phase: str,
     random_spawn_range: int,
     starting_loadout: str = "none",
+    difficulty: str = "easy",
 ) -> dict | None:
     """Pre-rollout setup: random TP, time reset, heal, clean inventory,
     optional starting loadout.
@@ -1080,8 +1081,11 @@ def _apply_setup(
         print(f"[setup] time set {ticks} (phase={start_phase})", flush=True)
         set_time(ticks, server_cmd_base=_SERVER_CMD_BASE)
 
-    # Resume normal difficulty so mob spawning + damage are live.
-    set_difficulty("easy", server_cmd_base=_SERVER_CMD_BASE)
+    # Restore the requested rollout difficulty. Default `easy` keeps mob
+    # spawning + damage live for survival rollouts; `peaceful` is the
+    # capability-isolation override for sanity tests (sleep_in_bed,
+    # craft chains, etc. — substrate signal without the mob confound).
+    set_difficulty(difficulty, server_cmd_base=_SERVER_CMD_BASE)
 
     # Wurst pre-flight: KillAura/AutoEat/AutoTool/AntiKnockback/AntiSpam must
     # be ON for survival rollouts to behave as designed. Before this bridge
@@ -1127,6 +1131,7 @@ def run(
     start_phase: str = "none",
     random_spawn_range: int = 0,
     starting_loadout: str = "none",
+    difficulty: str = "easy",
     jsonl_path: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> None:
@@ -1134,6 +1139,7 @@ def run(
         start_phase=start_phase,
         random_spawn_range=random_spawn_range,
         starting_loadout=starting_loadout,
+        difficulty=difficulty,
     )
     prompt = GOAL_PROMPTS.get(goal)
     if prompt is None:
@@ -1668,6 +1674,11 @@ if __name__ == "__main__":
                     default="none",
                     help="apply a named pre-set inventory loadout after spawn "
                          f"(presets: {sorted(_LOADOUTS)})")
+    ap.add_argument("--difficulty",
+                    choices=["peaceful", "easy", "normal", "hard"],
+                    default="easy",
+                    help="rollout difficulty (default easy). `peaceful` "
+                         "isolates capability tests from mob pressure.")
     ap.add_argument("--jsonl-out", default=None,
                     help="write per-turn JSONL to PATH (default: results/rollout-<goal>-<ts>.jsonl; '' to disable)")
     ap.add_argument("--model", default=DEFAULT_MODEL,
@@ -1680,6 +1691,7 @@ if __name__ == "__main__":
         start_phase=args.start_phase,
         random_spawn_range=args.random_spawn_range,
         starting_loadout=args.starting_loadout,
+        difficulty=args.difficulty,
         jsonl_path=args.jsonl_out,
         model=args.model,
     )

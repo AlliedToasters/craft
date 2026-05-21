@@ -26,3 +26,4 @@ toolsbackup.py
 
 # Local Claude Code state (scheduled-tasks lock, etc.)
 .claude/
+scratchpad/
