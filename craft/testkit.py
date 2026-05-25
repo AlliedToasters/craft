@@ -228,7 +228,6 @@ def build_arena(
 def random_spawn(
     *,
     range_blocks: int,
-    drop_y: int = 100,
     homunculus_base: str = HOMUNCULUS_BASE,
     server_cmd_base: str = SERVER_CMD_BASE,
     player_name: str = PLAYER_NAME,
@@ -238,7 +237,6 @@ def random_spawn(
     """Thin wrapper around `craft.spawn.random_spawn` with testkit defaults."""
     return _random_spawn(
         range_blocks=range_blocks,
-        drop_y=drop_y,
         homunculus_base=homunculus_base,
         server_cmd_base=server_cmd_base,
         player_name=player_name,

@@ -140,7 +140,6 @@ def stress_iteration(
         homunculus_base=HOMUNCULUS_BASE,
         server_cmd_base=SERVER_CMD_BASE,
         player_name=PLAYER_NAME,
-        drop_y=drop_y,
         anchor_xz=(ax, az),
         rng=rng,
         verbose=True,

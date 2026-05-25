@@ -5,18 +5,40 @@ rollout setup (`craft.agent._apply_setup`) and the integration test
 fixtures (`craft.testkit.random_spawn`) call into here so behavior stays
 identical across the substrate.
 
-Behavior per attempt: pick (dx, dz) ∈ [-range, range]^2, /tp the player
-to (anchor.x + dx, drop_y, anchor.z + dz) in creative, wait for
-on_ground, then reject if any of:
-  - stuck_no_ground   (TP'd inside terrain; suffocation risk)
-  - column_inverted   (landed too high — terrain extended above drop_y;
-                       agent clipped onto a peak or encased mid-block)
-  - cave_fall         (fell too far below drop_y — column had an open
-                       cave pocket; agent dropped into a deep cave)
-  - in_water          (typically ocean; rollout wood-starves)
-  - in_lava           (immediate death)
-  - bad biome         (BAD_BIOMES — empirically unsurvivable)
-  - HP drop in survival (creative shielded a suffocation slot)
+Spectator column-spawn (the "find the real surface" approach)
+-------------------------------------------------------------
+The previous design TP'd the player to a fixed drop_y (=100) in creative
+and reactively rejected the column afterward (encased-on-peak / cave-fall
+heuristics + an adaptive drop_y bump). Two structural problems:
+
+  1. **Encasement race.** Terrain does NOT generate until a player loads
+     the chunk. A creative player TP'd into an ungenerated chunk lands on
+     half-generated terrain, passes the survival HP probe, then the chunk
+     finishes generating *around* it mid-rollout → suffocation. The probe
+     window simply raced chunk-gen.
+  2. **Biome sampling bias.** Any column whose surface peaks above drop_y
+     got classified `column_inverted` and rejected, so high-terrain biomes
+     (mountains, plateaus) were systematically excluded from the spawn
+     distribution.
+
+Both fall out of "guess the surface Y up front." Instead we *measure* it:
+
+  - Put the player in **spectator** (no collision, no damage, no gravity)
+    and TP to a high Y (`probe_y`, default 320 — above the Y=256 terrain
+    cap and the ~Y=264 feature ceiling). The player's presence forces the
+    chunk to generate; spectator can't be encased while it settles.
+  - Poll `/scan_blocks` on the 1×1 column at (x, z) until it returns blocks
+    (generation complete) and locate the topmost solid ground block.
+  - TP to surface+1 (still spectator), then switch to survival. Because the
+    chunk is now fully generated, the survival HP probe is reliable, not
+    racy.
+
+Per-attempt reject reasons:
+  - gen_timeout            (chunk never generated within the poll budget)
+  - in_water / in_lava     (topmost column block is liquid)
+  - bad biome              (BAD_BIOMES — empirically unsurvivable)
+  - damage_in_survival     (HP dropped after survival switch — encased,
+                            e.g. a tree trunk sat at the chosen column)
 
 BAD_BIOMES grows from observed failure modes, not aesthetic preference.
 """
@@ -25,16 +47,27 @@ from __future__ import annotations
 
 import math
 import random as _random
-import re
 import time
 from typing import Callable, Optional
 
 import requests
 
-
-_INVERTED_Y_RE = re.compile(r"column_inverted\(y=(-?\d+)\)")
-
 from craft.world import set_gamemode
+
+
+# Overworld vertical bounds (MC 1.21.4). probe_y sits above the Y=256
+# natural-terrain cap and the ~Y=264 feature ceiling so a spectator TP'd
+# there is always above the surface; the column scan reaches the world
+# floor so caves/overhangs below the surface don't confuse detection.
+WORLD_BOTTOM_Y: int = -64
+SPECTATOR_PROBE_Y: int = 320
+
+# Blocks that are not a standing surface. Air variants are obvious;
+# leaves/logs/bark are filtered so a column that happens to fall on a tree
+# resolves to the ground *under* the trunk — placing there puts the player
+# inside the trunk, which the survival probe then rejects (so tree columns
+# retry instead of spawning the agent up a canopy).
+_AIR_LIKE: frozenset[str] = frozenset({"air", "cave_air", "void_air"})
 
 
 BAD_BIOMES: tuple[str, ...] = (
@@ -60,42 +93,6 @@ BAD_BIOMES: tuple[str, ...] = (
 )
 
 
-def _classify_landing(
-    landing_y: int,
-    drop_y: int,
-    *,
-    inverted_margin: int = 5,
-    cave_fall_max: int = 50,
-) -> Optional[str]:
-    """Reject landings that signal a bad column (encased peak or cave pocket).
-
-    The current spawn-retry loop catches water/lava/biome but is blind to
-    column shape:
-      - High terrain above drop_y → agent clips onto a peak. on_ground=true
-        but the spawn is effectively encased mid-block; build_shelter
-        aborts downstream with `encased=true`.
-      - Open column with a cave pocket → agent falls *through* the natural
-        surface into a cave. on_ground=true, biome valid, but surface() now
-        has to ascend 9-20 blocks of stone (Baritone vertical-mine timeout).
-
-    Returns a string reason (used as the `attempts[].reason` audit code) if
-    the landing should be rejected, else None.
-
-    Thresholds: with drop_y=100, defaults reject landing_y>=95 (inverted)
-    and landing_y<50 (cave-fall). The 50-block cave-fall threshold leaves
-    normal plains (y≈64) and forest (y≈70) alone while catching the
-    observed-failure landings (y=44/50/55/59 in deep caves below
-    y=70-79 surfaces). Tunable per call. Doesn't catch all cave-fall
-    cases — a column-scan for the natural surface would, but that needs
-    a homunculus API we don't have yet.
-    """
-    if landing_y >= drop_y - inverted_margin:
-        return f"column_inverted(y={landing_y})"
-    if drop_y - landing_y > cave_fall_max:
-        return f"cave_fall(y={landing_y})"
-    return None
-
-
 def _server_cmd(server_cmd_base: str, cmd: str, *, timeout: float = 5.0) -> dict:
     try:
         r = requests.post(
@@ -118,14 +115,76 @@ def _stats(homunculus_base: str) -> Optional[dict]:
         return None
 
 
-def _position(homunculus_base: str) -> Optional[dict]:
-    """Read /position for landing_y. /stats does not include y."""
+def _scan_player_y(homunculus_base: str) -> Optional[float]:
+    """Player's current Y from /position (None on error). Used to confirm
+    the player settled at the spawn surface rather than fell elsewhere."""
     try:
         r = requests.get(f"{homunculus_base}/position", timeout=5.0)
         r.raise_for_status()
-        return r.json()
+        return float(r.json().get("y"))
+    except (requests.RequestException, ValueError, TypeError):
+        return None
+
+
+def _scan_column(
+    homunculus_base: str,
+    x: int,
+    z: int,
+    *,
+    y_top: int = SPECTATOR_PROBE_Y,
+    y_bot: int = WORLD_BOTTOM_Y,
+    timeout: float = 10.0,
+) -> Optional[list[dict]]:
+    """Scan the 1×1 vertical column at (x, z), returning the block list.
+
+    Returns None on transport error OR when the chunk hasn't generated yet
+    (homunculus reports success=False / empty when the chunk isn't loaded).
+    The caller polls on this to detect generation. Volume is
+    (y_top - y_bot + 1) cells (≤385 for the default range) — under
+    homunculus's MAX_VOLUME=2000 cap.
+    """
+    try:
+        r = requests.get(
+            f"{homunculus_base}/scan_blocks",
+            params={"x1": x, "y1": y_bot, "z1": z, "x2": x, "y2": y_top, "z2": z},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
     except (requests.RequestException, ValueError):
         return None
+    if data.get("success") is False:
+        return None
+    return data.get("blocks") or None
+
+
+def _surface_from_column(blocks: list[dict]) -> tuple[Optional[int], Optional[str]]:
+    """Topmost standing surface in a column block list.
+
+    Returns (surface_y, block_id_short). Skips air variants and tree
+    canopy (leaves/logs/bark) so the result is true ground; the caller
+    treats a water/lava result as a liquid-surface reject. Returns
+    (None, None) for an all-air / empty column.
+    """
+    best_y: Optional[int] = None
+    best_id: Optional[str] = None
+    for b in blocks:
+        bid = str(b.get("id", "")).split(":")[-1]
+        if (
+            bid in _AIR_LIKE
+            or bid.endswith("_leaves")
+            or bid.endswith("_log")
+            or bid.endswith("_wood")
+        ):
+            continue
+        y = b.get("y")
+        if y is None:
+            continue
+        y = int(y)
+        if best_y is None or y > best_y:
+            best_y = y
+            best_id = bid
+    return best_y, best_id
 
 
 def random_spawn(
@@ -134,13 +193,14 @@ def random_spawn(
     homunculus_base: str,
     server_cmd_base: str,
     player_name: str,
-    drop_y: int = 100,
+    probe_y: int = SPECTATOR_PROBE_Y,
     max_retries: int = 12,
     bad_biomes: tuple[str, ...] = BAD_BIOMES,
-    column_inverted_margin: int = 5,
-    column_cave_fall_max: int = 50,
-    column_inverted_bump_after: int = 2,
-    column_inverted_bump_dy: int = 40,
+    gen_timeout_s: float = 20.0,
+    gen_poll_interval_s: float = 0.5,
+    settle_timeout_s: float = 3.0,
+    survival_probe_s: float = 1.0,
+    min_spawn_hp: float = 18.0,
     anchor_xz: Optional[tuple[int, int]] = None,
     rng: Optional[_random.Random] = None,
     verbose: bool = True,
@@ -157,10 +217,10 @@ def random_spawn(
             "ok": bool,                            # at least one attempt landed cleanly
             "anchor_xz": (ax, az) | None,          # the offsets are measured from this
             "offset": (dx, dz) | None,             # the chosen offset (last attempt if !ok)
-            "tp_to": (tx, drop_y, tz) | None,      # absolute target coord
+            "tp_to": (tx, surface_y+1, tz) | None, # absolute spawn coord
             "biome": str | None,                   # biome at chosen position
             "attempts": [                          # per-attempt audit trail
-                {"dx", "dz", "ok": bool, "reason": str},
+                {"dx", "dz", "ok": bool, "reason": str, "surface_y": int | None},
                 ...
             ],
         }
@@ -182,88 +242,123 @@ def random_spawn(
     else:
         ax, az = anchor_xz
 
-    def _attempt(dx: int, dz: int, *, this_drop_y: int,
-                 this_cave_fall_max: int) -> tuple[bool, str]:
+    def _attempt(dx: int, dz: int) -> tuple[bool, str, Optional[int]]:
         tx = ax + dx
         tz = az + dz
         if verbose:
-            log(f"[spawn] tp to ({tx},{this_drop_y},{tz}) "
-                f"(offset {dx},{dz} from {ax},{az})")
-        set_gamemode("creative", player_name=player_name,
+            log(f"[spawn] probe ({tx},?,{tz}) (offset {dx},{dz} from {ax},{az})")
+
+        # 1. Spectator at high Y forces chunk-gen without collision/damage.
+        set_gamemode("spectator", player_name=player_name,
                      server_cmd_base=server_cmd_base)
-        _server_cmd(server_cmd_base, f"tp {player_name} {tx} {this_drop_y} {tz}")
-        _server_cmd(server_cmd_base, f"clear {player_name}")
-        landed = False
-        for _ in range(20):
-            time.sleep(0.5)
-            s = _stats(homunculus_base)
-            if s and s.get("on_ground"):
-                landed = True
-                break
-        if not landed:
-            return False, "stuck_no_ground"
-        # Column-quality check: /stats omits coords, so read /position for y.
-        # Catches both encased-on-peak (landing_y≈drop_y) and cave-fall
-        # (landing_y << drop_y) which the existing checks miss.
-        pos = _position(homunculus_base) or {}
-        ly_raw = pos.get("y")
-        if ly_raw is not None:
-            landing_y = int(math.floor(float(ly_raw)))
-            reason = _classify_landing(
-                landing_y, this_drop_y,
-                inverted_margin=column_inverted_margin,
-                cave_fall_max=this_cave_fall_max,
-            )
-            if reason is not None:
-                return False, reason
-        s = _stats(homunculus_base) or {}
-        if s.get("in_water"):
-            return False, "in_water"
-        if s.get("in_lava"):
-            return False, "in_lava"
-        biome = (s.get("biome") or "").split(":")[-1]
-        if biome in bad_biomes:
-            return False, f"biome_{biome}"
-        # Survival probe catches "on_ground=true but stuck inside a wall" —
-        # creative shielded a suffocation slot while we sampled. ~24 ticks
-        # is enough for at least one suffocation tick to register.
+        _server_cmd(server_cmd_base, f"tp {player_name} {tx} {probe_y} {tz}")
+
+        # 2. Poll the column until terrain generates and a surface appears.
+        surf_y: Optional[int] = None
+        top_id: Optional[str] = None
+        deadline = time.time() + gen_timeout_s
+        while time.time() < deadline:
+            time.sleep(gen_poll_interval_s)
+            blocks = _scan_column(homunculus_base, tx, tz,
+                                  y_top=probe_y, y_bot=WORLD_BOTTOM_Y)
+            if blocks:
+                surf_y, top_id = _surface_from_column(blocks)
+                if surf_y is not None:
+                    break
+        if surf_y is None:
+            return False, "gen_timeout", None
+
+        # 3. Liquid surface → not a viable standing spot.
+        if top_id == "water":
+            return False, "in_water", surf_y
+        if top_id == "lava":
+            return False, "in_lava", surf_y
+
+        spawn_y = surf_y + 1
+
+        # 4. Place via SURVIVAL collision, not a spectator TP. The homunculus
+        #    spectator player drifts downward with noclip, so a spectator TP
+        #    sinks the player *through* the surface; switching to survival
+        #    first gives them collision so the TP lands them cleanly on top.
+        #    The double-TP zeroes the residual fall velocity from the
+        #    gamemode-switch tick (a single TP leaves a ~1-tick drop → ~0.3
+        #    HP of phantom fall damage that muddies the encasement probe).
+        #    TP to the block CENTER (+0.5): integer coords put the player's
+        #    feet on a block corner, so their bounding box pokes into the
+        #    adjacent (unscanned) column — at a terrain/biome boundary that
+        #    neighbor can be a cliff face, encasing the player in a column we
+        #    never verified (observed killing agent2 at a plains/forest edge,
+        #    2026-05-25). Centering keeps the player inside the scanned column.
+        cx_, cz_ = tx + 0.5, tz + 0.5
         set_gamemode("survival", player_name=player_name,
                      server_cmd_base=server_cmd_base)
-        time.sleep(1.2)
+        _server_cmd(server_cmd_base, f"tp {player_name} {cx_} {spawn_y} {cz_}")
+        _server_cmd(server_cmd_base, f"clear {player_name}")
+        time.sleep(0.4)
+        _server_cmd(server_cmd_base, f"tp {player_name} {cx_} {spawn_y} {cz_}")
+
+        # 5. Settle: wait until the player is grounded at the surface.
+        settle_deadline = time.time() + settle_timeout_s
+        s: dict = {}
+        while time.time() < settle_deadline:
+            time.sleep(0.3)
+            s = _stats(homunculus_base) or {}
+            p = _scan_player_y(homunculus_base)
+            if s.get("on_ground") and (p is None or abs(p - spawn_y) <= 2):
+                break
+
+        # 6. Biome gate.
+        biome = (s.get("biome") or "").split(":")[-1]
+        if biome in bad_biomes:
+            set_gamemode("spectator", player_name=player_name,
+                         server_cmd_base=server_cmd_base)
+            return False, f"biome_{biome}", surf_y
+
+        # 7. Encasement probe. With collision placement there is no settle
+        #    fall on clean ground (HP stays pinned at 20 under peaceful
+        #    regen), so any sustained HP deficit means the spawn slot itself
+        #    is bad — e.g. the column fell on a tree trunk and spawn_y is
+        #    inside the log, where suffocation keeps HP below full.
+        time.sleep(survival_probe_s)
         s = _stats(homunculus_base) or {}
         hp = float(s.get("health") or 0.0)
-        if hp < 20.0:
-            set_gamemode("creative", player_name=player_name,
+        # HP alone is the encasement signal: with centered collision placement
+        # a clean spawn holds 20 (peaceful regen pins it) while an encased slot
+        # bleeds well below the threshold. on_ground is intentionally NOT
+        # required here — under fleet contention it can lag past the probe even
+        # for a perfectly good full-HP spawn (false-rejects observed at C=20).
+        if hp < min_spawn_hp:
+            set_gamemode("spectator", player_name=player_name,
                          server_cmd_base=server_cmd_base)
-            return False, f"damage_in_survival(hp={hp:.1f})"
-        return True, biome
+            return False, f"damage_in_survival(hp={hp:.1f})", surf_y
+        return True, biome, surf_y
 
     attempts: list[dict] = []
     last_tp: tuple[int, int, int] | None = None
-    # Adaptive retry: when column_inverted fires repeatedly the region has
-    # terrain peaking above drop_y. Track max observed landing_y; after
-    # N inverted hits, raise drop_y above the peak (also bumping
-    # cave_fall_max proportionally so legit landings aren't reclassified).
-    current_drop_y = drop_y
-    current_cave_fall_max = column_cave_fall_max
-    inverted_count = 0
-    max_inverted_y = -10_000
+    # Exhaustion fallback: the best *land* surface seen across attempts, so an
+    # exhausted spawn lands on solid ground instead of wherever the last
+    # (possibly water) probe left the player. A bad-biome surface is dry and
+    # survivable; an encased (damage) surface is the last resort but still
+    # beats drowning. Priority: biome reject (2) > damage reject (1).
+    fallback: tuple[int, tuple[int, int, int]] | None = None
     for attempt in range(1, max_retries + 1):
         dx = rng.randint(-range_blocks, range_blocks)
         dz = rng.randint(-range_blocks, range_blocks)
-        last_tp = (ax + dx, current_drop_y, az + dz)
-        ok, info = _attempt(
-            dx, dz,
-            this_drop_y=current_drop_y,
-            this_cave_fall_max=current_cave_fall_max,
-        )
+        ok, info, surf_y = _attempt(dx, dz)
+        if surf_y is not None:
+            last_tp = (ax + dx, surf_y + 1, az + dz)
+            prio = 2 if info.startswith("biome_") else (
+                1 if info.startswith("damage_in_survival") else 0)
+            if prio and (fallback is None or prio >= fallback[0]):
+                fallback = (prio, (ax + dx, surf_y + 1, az + dz))
         attempts.append({
             "dx": dx, "dz": dz, "ok": ok, "reason": info,
-            "drop_y": current_drop_y,
+            "surface_y": surf_y,
         })
         if ok:
             if verbose:
-                log(f"[spawn] landed ok at attempt {attempt}: biome={info}")
+                log(f"[spawn] spawned ok at attempt {attempt}: "
+                    f"biome={info} surface_y={surf_y}")
             set_gamemode("survival", player_name=player_name,
                          server_cmd_base=server_cmd_base)
             return {
@@ -276,26 +371,22 @@ def random_spawn(
             }
         if verbose:
             log(f"[spawn] attempt {attempt}/{max_retries} rejected: {info}")
-        m = _INVERTED_Y_RE.match(info)
-        if m:
-            inverted_count += 1
-            max_inverted_y = max(max_inverted_y, int(m.group(1)))
-            if inverted_count >= column_inverted_bump_after:
-                new_drop_y = max_inverted_y + column_inverted_bump_dy
-                if new_drop_y > current_drop_y:
-                    bumped_by = new_drop_y - drop_y
-                    current_drop_y = new_drop_y
-                    current_cave_fall_max = column_cave_fall_max + bumped_by
-                    if verbose:
-                        log(f"[spawn] adaptive: {inverted_count} column_inverted "
-                            f"hits (max y={max_inverted_y}); raising drop_y to "
-                            f"{current_drop_y} (cave_fall_max={current_cave_fall_max})")
 
-    if verbose:
-        log(f"[spawn] WARNING: exhausted {max_retries} retries; "
-            f"proceeding with last position")
     set_gamemode("survival", player_name=player_name,
                  server_cmd_base=server_cmd_base)
+    if fallback is not None:
+        # Land the player on the best dry surface we found rather than leaving
+        # them mid-air / in water (an exhausted spawn used to drown — agent17,
+        # 2026-05-25). Centered TP, same as the success placement.
+        fx, fy, fz = fallback[1]
+        _server_cmd(server_cmd_base, f"tp {player_name} {fx + 0.5} {fy} {fz + 0.5}")
+        last_tp = fallback[1]
+        if verbose:
+            log(f"[spawn] WARNING: exhausted {max_retries} retries; "
+                f"placing at best land surface {fallback[1]} (prio {fallback[0]})")
+    elif verbose:
+        log(f"[spawn] WARNING: exhausted {max_retries} retries; "
+            f"no land surface found — proceeding at last position")
     return {
         "ok": False,
         "anchor_xz": (ax, az),
