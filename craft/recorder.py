@@ -26,12 +26,23 @@ Enable with CRAFT_RECORD_VIDEO=1 (or --record-video). Env knobs:
   CRAFT_RECORD_DISPLAY  explicit X display to grab (default: derived from the
                         homunculus port via the fleet :200+N convention, else
                         $DISPLAY).
+  CRAFT_RECORD_KEEP     retention policy: 'all' (default, keep every tape — for
+                        dataset-building) or 'failures' (keep only rollouts that
+                        failed; delete clean successes at rollout end).
+  CRAFT_RECORD_SAMPLE   under keep=failures, also retain this fraction [0..1] of
+                        clean successes for baseline footage (default 0).
+
+Recording is cheap (the frame is already rendered; encode ≈ 0.65 core for 10
+streams), so the only real cost is disk over long runs. keep=failures buys
+"record everything overnight, wake up to only the tapes worth diagnosing" — the
+disk bill collapses to the interesting minority while CPU stays free.
 """
 
 from __future__ import annotations
 
 import atexit
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -93,6 +104,20 @@ def _detect_mc_geometry(display: str) -> tuple[int, int, int, int] | None:
     return None
 
 
+def _keep_policy() -> str:
+    """CRAFT_RECORD_KEEP normalized → 'all' | 'failures'. Unknown → 'all'."""
+    p = (os.environ.get("CRAFT_RECORD_KEEP", "all") or "all").strip().lower()
+    return p if p in ("all", "failures") else "all"
+
+
+def _sample_rate() -> float:
+    """CRAFT_RECORD_SAMPLE clamped to [0,1]; malformed → 0."""
+    try:
+        return max(0.0, min(1.0, float(os.environ.get("CRAFT_RECORD_SAMPLE", "0"))))
+    except ValueError:
+        return 0.0
+
+
 def _video_path_for(jsonl_path: str | None) -> str:
     """Derive the video artifact path so it sits beside the transcript."""
     if jsonl_path:
@@ -114,6 +139,7 @@ class RolloutRecorder:
         self.region = region
         self.proc: subprocess.Popen | None = None
         self._stopped = False
+        self._discarded = False
 
     def _build_cmd(self) -> list[str]:
         if self.region is not None:
@@ -175,6 +201,35 @@ class RolloutRecorder:
         except Exception:
             pass
         print(f"[recorder] stopped → {self.path}", flush=True)
+
+    def should_keep(self, *, failed: bool) -> bool:
+        """Decide whether to retain the recording given the rollout outcome.
+
+        keep=all (default) → always keep. keep=failures → keep iff the rollout
+        failed (died / ended early), plus a CRAFT_RECORD_SAMPLE fraction of clean
+        successes. Unrecognized policy fails safe to keep.
+        """
+        if _keep_policy() != "failures":
+            return True
+        return failed or (random.random() < _sample_rate())
+
+    def discard(self) -> None:
+        """Delete the recording + its ffmpeg log (clean rollout under
+        keep=failures). Best-effort; reports the space freed."""
+        if self._discarded:
+            return
+        self._discarded = True
+        for path in (self.path + ".ffmpeg.log", self.path):
+            try:
+                if os.path.exists(path):
+                    sz = os.path.getsize(path)
+                    os.remove(path)
+                    if path == self.path:
+                        print(f"[recorder] discarded clean-rollout tape "
+                              f"(keep=failures, freed {sz / 1048576:.1f}MB): {path}",
+                              flush=True)
+            except OSError as e:
+                print(f"[recorder] failed to discard {path}: {e}", flush=True)
 
 
 def start_rollout_recording(jsonl_path: str | None) -> RolloutRecorder | None:

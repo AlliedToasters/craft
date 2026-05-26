@@ -1314,6 +1314,11 @@ def run(
     # pre-run deaths in homunculus's ring buffer are ignored.
     last_death_ts = int(time.time() * 1000)
 
+    # Rollout-outcome trackers for the video keep-on-failure policy. `turn` is
+    # also seeded so a max_turns=0 (empty loop) doesn't NameError below.
+    rollout_had_death = False
+    turn = 0
+
     # Milestone framework — staged goal progression. Predicates evaluated per
     # turn against stats + inventory. When one fires, its announcement is
     # appended to the opening (messages[1]) so it persists past the WINDOW
@@ -1463,6 +1468,7 @@ def run(
                     "death": d,
                 }) + "\n")
                 jsonl_fh.flush()
+            rollout_had_death = True
             print(f"\n=== PERMADEATH: trajectory terminated at turn {turn} ===")
             break
 
@@ -1680,6 +1686,7 @@ def run(
             jsonl_fh.write(json.dumps(rec) + "\n")
 
         if died_this_turn:
+            rollout_had_death = True
             print(f"\n=== PERMADEATH: trajectory terminated at turn {turn} ===")
             break
 
@@ -1701,12 +1708,23 @@ def run(
     )
     # Finalize the screen recording (idempotent; atexit also covers the
     # exception/early-return paths, and the fragmented mp4 survives a hard kill).
+    # Then apply the keep-on-failure retention policy: a rollout is a "failure"
+    # (worth a tape) if the agent died or the loop ended before max_turns
+    # (death / no-tool-call / empty-plan bail). Clean full-length survivals are
+    # discarded under CRAFT_RECORD_KEEP=failures.
+    video_kept = None
     if recorder is not None:
         recorder.stop()
+        rollout_failed = rollout_had_death or (turn < max_turns)
+        video_kept = recorder.should_keep(failed=rollout_failed)
+        if not video_kept:
+            recorder.discard()
     if jsonl_fh is not None:
         jsonl_fh.write(json.dumps({
             "_type": "end",
             "ended_at": time.time(),
+            "video_kept": video_kept,
+            "rollout_had_death": rollout_had_death,
             "plan_s_total": round(plan_s_total, 3),
             "plan_s_mean": round(mean_plan, 3),
             "wall_s": round(rollout_wall_s, 3),
