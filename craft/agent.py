@@ -20,6 +20,7 @@ import requests
 from craft.config import PLAYER_NAME as _PLAYER_NAME, SERVER_CMD_BASE as _SERVER_CMD_BASE
 from craft.llm import chat_with_tools, DEFAULT_MODEL
 from craft.milestones import Milestones, resolve_milestones
+from craft.nudges import resolve_nudges, render_nudges
 from craft.mine import _yaw_to_direction
 from craft.spawn import random_spawn
 from craft.tools import (
@@ -782,6 +783,7 @@ def _build_state_chunk(
     stats_str: str | None,
     inv_str: str | None,
     smelts_str: str | None,
+    nudges_str: str | None = None,
 ) -> str:
     """Render the per-turn STATE body delivered as its own user message.
 
@@ -794,6 +796,9 @@ def _build_state_chunk(
     Always returns a non-empty string. Transport failures surface as
     explicit "(unavailable …)" literals rather than silent omission, so a
     homunculus blip doesn't silently strip state from the prompt.
+
+    `nudges_str`, when present, is appended last so the reactive hint is the
+    final thing the model reads before choosing its next call (recency).
     """
     parts: list[str] = []
     if stats_str:
@@ -806,7 +811,26 @@ def _build_state_chunk(
         parts.append("Current inventory: (unavailable — homunculus transport error)")
     if smelts_str:
         parts.append(smelts_str)
+    if nudges_str:
+        parts.append(nudges_str)
     return "STATE:\n" + "\n\n".join(parts)
+
+
+def _render_nudges(nudge_chain: list, stats_raw: dict | None, inv_raw: dict | None) -> str | None:
+    """Render the active reactive nudges from current stats + inventory.
+
+    Sister to _build_state_chunk's `nudges_str`. None when the chain is empty,
+    stats are unavailable, or no nudge's condition holds this turn.
+    """
+    if not nudge_chain or not stats_raw:
+        return None
+    state = {
+        "food": stats_raw.get("food"),
+        "day_ticks": stats_raw.get("day_ticks"),
+        "day_count": stats_raw.get("day_count"),
+        "inv": _inventory_compact(inv_raw),
+    }
+    return render_nudges(nudge_chain, state)
 
 
 def _stats_raw() -> dict | None:
@@ -1187,6 +1211,9 @@ def run(
                     os.environ.get("CRAFT_MILESTONES")
                 )
             ],
+            "nudges": [
+                n.name for n in resolve_nudges(os.environ.get("CRAFT_NUDGES"))
+            ],
         }
         if wurst_report is not None:
             header["wurst_preflight"] = {
@@ -1241,11 +1268,20 @@ def run(
         {"role": "system", "content": prompt},
         {"role": "user", "content": opening},
     ]
+    # Reactive nudge set — STATE-block hints toward under-used verbs, gated on
+    # current state and recomputed every turn (ephemeral, like the equipment
+    # nudge). Chain is selected from CRAFT_NUDGES (comma-separated names; unset
+    # → default set; "" → control arm, no nudges). Resolved here so the initial
+    # pre-loop STATE can carry a nudge too (cook_kitchen/hunt_meadow spawn at
+    # hunger=2, so the food nudge is relevant from turn 1).
+    nudge_chain = resolve_nudges(os.environ.get("CRAFT_NUDGES"))
+
     # Carried state — refreshed at the end of each turn from the post-dispatch
     # fetches, injected at the head of the next turn's prompt. Computed once
     # before the loop so turn 1's prompt isn't blind.
     pending_state = _build_state_chunk(
         _fetch_stats(), _fetch_inventory(), _fetch_smelts(),
+        _render_nudges(nudge_chain, _stats_raw(), _inventory_raw()),
     )
     # Cap conversation length to the last N turns so prefill stays bounded.
     # Each turn appends exactly 2 messages (assistant tool_call + tool result)
@@ -1523,7 +1559,10 @@ def run(
         if evaded_preamble:
             chunks.insert(0, evaded_preamble)
         full_outcome = "\n\n".join(chunks)
-        state_chunk = _build_state_chunk(stats_str, inv_str, smelts_str)
+        nudges_str = _render_nudges(nudge_chain, stats_raw, inv_raw)
+        if nudges_str:
+            print(f"[nudge]\n{nudges_str}")
+        state_chunk = _build_state_chunk(stats_str, inv_str, smelts_str, nudges_str)
 
         # Surface any death that landed during this turn. We use the most
         # recent record (deaths are rare; multi-death within one turn is a
@@ -1595,6 +1634,7 @@ def run(
                 "exec_s": round(exec_dt, 3),
                 "ctx_s": round(ctx_dt, 3),
                 "total_s": round(turn_total_dt, 3),
+                "nudge": nudges_str,
                 "shelter_armed": _shelter_watch is not None,
                 "shelter_breach": (_shelter_watch or {}).get("breach", False),
                 "shelter_str": shelter_str,
