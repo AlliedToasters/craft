@@ -136,6 +136,61 @@ def set_setting_value(
         return {"success": False, "reason": "transport_error", "message": str(e)}
 
 
+def set_autoeat_offhand_mode(*, verbose: bool = True) -> dict:
+    """Restrict Wurst AutoEat to eat only from the hands/offhand.
+
+    Sets "Take items from" = Hands (maxInvSlot=0, so AutoEat ignores all hotbar
+    and main-inventory slots except the held one) and "Allow offhand" = true. The
+    offhand then becomes the sole auto-eat source, which homunculus's offhand-food
+    curator (Equipper) fills with policy-approved food. Net effect: raw meat sitting
+    anywhere in the inventory is never auto-eaten — closing the "raw beef gets eaten
+    before it can be cooked" hole. See FoodPolicy (homunculus) + set_food_policy.
+
+    Returns {ok, take_items_from, allow_offhand}; never raises.
+    """
+    r1 = set_setting_value("AutoEat", "Take items from", "Hands")
+    r2 = set_setting_value("AutoEat", "Allow offhand", True)
+    ok = bool(r1.get("success")) and bool(r2.get("success"))
+    if verbose:
+        if ok:
+            print("[autoeat] mode=Hands + offhand-eating on", flush=True)
+        else:
+            print(
+                f"[autoeat] FAILED to set offhand mode: "
+                f"take_items_from={r1.get('reason') or r1.get('success')} "
+                f"allow_offhand={r2.get('reason') or r2.get('success')}",
+                flush=True,
+            )
+    return {"ok": ok, "take_items_from": r1, "allow_offhand": r2}
+
+
+def set_food_policy(mode: str, *, verbose: bool = True, timeout: float = 5.0) -> dict:
+    """POST /food_policy — homunculus endpoint (NOT /wurst/*), kept here so all
+    preflight substrate config lives together.
+
+    `mode` is "any" (daily-driver: every food approved for the offhand curator) or
+    "cooked_only" (cook-capability tests: raw meat never staged → never auto-eaten).
+    Pairs with set_autoeat_offhand_mode(). Returns the parsed response dict.
+    """
+    try:
+        resp = requests.post(
+            f"{HOMUNCULUS_BASE}/food_policy",
+            json={"mode": mode},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        r = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        r = {"success": False, "reason": "transport_error", "message": str(e)}
+    if verbose:
+        if r.get("success"):
+            print(f"[food_policy] mode={r.get('mode')}", flush=True)
+        else:
+            print(f"[food_policy] FAILED ({r.get('reason')}): {r.get('message', '')[:100]}",
+                  flush=True)
+    return r
+
+
 def seed_autodrop_from_tier(tier: str, *, verbose: bool = True) -> dict:
     """Push the autodrop policy's drop-list-for-tier into AutoDrop.Items.
 

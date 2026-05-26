@@ -1093,6 +1093,16 @@ def _apply_setup(
     # missed click silently invalidated rollout outcomes.
     wurst_report = ensure_wurst_hacks_on()
 
+    # AutoEat offhand-only eating + food policy. AutoEat is pinned to Hands mode
+    # (eats only from the offhand/held slot), and homunculus's offhand-food curator
+    # stages policy-approved food there. CRAFT_FOOD_POLICY=cooked_only keeps raw meat
+    # out of the offhand so it can't be auto-eaten before the agent cooks it; default
+    # `any` preserves daily-driver behavior (raw meat still feeds the agent).
+    from craft.wurst import set_autoeat_offhand_mode, set_food_policy
+    wurst_report["autoeat_offhand"] = set_autoeat_offhand_mode()
+    food_policy = os.environ.get("CRAFT_FOOD_POLICY", "any")
+    wurst_report["food_policy"] = set_food_policy(food_policy)
+
     # AutoDrop policy seeding. With AutoDrop now in REQUIRED_HACKS the module
     # itself is on; this step writes the whitelist-complement drop list into
     # its `Items` setting so the policy is an *inclusion* list of "what to

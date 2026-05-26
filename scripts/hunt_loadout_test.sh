@@ -99,7 +99,7 @@ run_one() {
     echo "[$(date '+%H:%M:%S')] agent${n} ended turns=${turns} dur=${dur}s hunt_attempts=${hunt_attempts} hunt_successes=${hunt_successes}${death:+ death=$death}" | tee -a "$INDEX"
 }
 
-for n in 0 1 2 3 4; do
+for n in ${CRAFT_TEST_AGENTS:-0 1 2 3 4}; do
     run_one "$n" &
 done
 

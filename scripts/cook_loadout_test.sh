@@ -43,6 +43,10 @@ export CRAFT_SCOUT_FANOUT_MODEL="$QWEN"
 export CRAFT_SCOUT_UNIFY_MODEL="$QWEN"
 export CRAFT_LOOK_AROUND_MAX_RADIUS=1
 export CRAFT_MINE_FORCE_XRAY=1
+# Cook-capability isolation: raw meat must NOT be auto-eaten before the agent
+# cooks it, so the substrate stops feeding it raw beef. Requires the homunculus
+# offhand-food curator + AutoEat Hands mode (preflight wires both).
+export CRAFT_FOOD_POLICY="${CRAFT_FOOD_POLICY:-cooked_only}"
 
 DIFFICULTY="${COOK_TEST_DIFFICULTY:-easy}"
 
@@ -101,7 +105,7 @@ run_one() {
     echo "[$(date '+%H:%M:%S')] agent${n} ended turns=${turns} dur=${dur}s smelt_attempts=${smelt_attempts} smelt_successes=${smelt_successes} collect_attempts=${collect_attempts} cooked_observed=${cooked_observed}${death:+ death=$death}" | tee -a "$INDEX"
 }
 
-for n in 0 1 2 3 4; do
+for n in ${CRAFT_TEST_AGENTS:-0 1 2 3 4}; do
     run_one "$n" &
 done
 
