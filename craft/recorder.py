@@ -149,12 +149,19 @@ class RolloutRecorder:
         else:
             inp = self.display
             size = []  # x11grab grabs the whole display when size is omitted
+        # Keyframe every ~1s. x264's default keyint (~250 frames = 25s @10fps)
+        # leaves scrubbing with no nearby I-frame, so a seek decodes P-frame
+        # deltas off a stale reference → smear/datamosh until the next keyframe.
+        # Tying GOP to fps makes any seek land ≤1s from a keyframe (smooth
+        # scrubbing) and shrinks the +frag_keyframe fragments to ~1s each.
+        gop = max(1, self.fps)
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
             "-f", "x11grab", "-framerate", str(self.fps), *size, "-i", inp,
             "-an",
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
             "-pix_fmt", "yuv420p", "-crf", str(self.crf),
+            "-g", str(gop), "-keyint_min", str(gop),
             # Fragmented moov → the file stays playable if we're hard-killed.
             "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             self.path,
