@@ -164,6 +164,30 @@ def set_autoeat_offhand_mode(*, verbose: bool = True) -> dict:
     return {"ok": ok, "take_items_from": r1, "allow_offhand": r2}
 
 
+def set_killaura_no_pvp(*, verbose: bool = True) -> dict:
+    """Stop KillAura from attacking other players (enable "Filter players").
+
+    Fleet agents share one MC server; with the player filter OFF (this build's
+    default), KillAura melees any agent that wanders within range and
+    AutoRespawn loops the kill — an inter-agent PvP confound that contaminates
+    death tallies and is never wanted (they're all bots). Wurst filter semantics
+    are EXCLUSION, so True = exclude players = no PvP. Harmless on a
+    single-player instance (no other players to filter). Client-side only — no
+    server.properties change.
+
+    Returns the parsed /wurst/setting response; never raises.
+    """
+    r = set_setting_value("KillAura", "Filter players", True)
+    if verbose:
+        if r.get("success"):
+            extra = "" if r.get("changed") else " (already)"
+            print(f"[killaura] Filter players=on — no inter-agent PvP{extra}", flush=True)
+        else:
+            print(f"[killaura] FAILED to set Filter players: "
+                  f"{r.get('reason')} {r.get('message', '')[:80]}", flush=True)
+    return r
+
+
 def set_food_policy(mode: str, *, verbose: bool = True, timeout: float = 5.0) -> dict:
     """POST /food_policy — homunculus endpoint (NOT /wurst/*), kept here so all
     preflight substrate config lives together.
