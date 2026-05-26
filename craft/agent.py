@@ -21,6 +21,7 @@ from craft.config import PLAYER_NAME as _PLAYER_NAME, SERVER_CMD_BASE as _SERVER
 from craft.llm import chat_with_tools, DEFAULT_MODEL
 from craft.milestones import Milestones, resolve_milestones
 from craft.nudges import resolve_nudges, render_nudges
+from craft.recorder import start_rollout_recording
 from craft.mine import _yaw_to_direction
 from craft.spawn import random_spawn
 from craft.tools import (
@@ -1169,6 +1170,18 @@ def run(
     jsonl_path: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> None:
+    # Resolve the JSONL artifact path up front so the recorder — started before
+    # spawn to capture the full rollout (spectator-drop → terminal) — shares the
+    # transcript's stem (agentN-….jsonl ↔ agentN-….mp4). jsonl_path='' disables
+    # the transcript; the recorder then falls back to a default video path.
+    if jsonl_path is None:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        jsonl_path = f"results/rollout-{goal}-{ts}-{_PLAYER_NAME}.jsonl"
+    # Best-effort screen recording (CRAFT_RECORD_VIDEO / --record-video). No-op
+    # when disabled or ffmpeg/display unavailable; never raises into the rollout.
+    recorder = start_rollout_recording(jsonl_path)
+    video_path = recorder.path if recorder is not None else None
+
     wurst_report = _apply_setup(
         start_phase=start_phase,
         random_spawn_range=random_spawn_range,
@@ -1179,14 +1192,9 @@ def run(
     if prompt is None:
         raise ValueError(f"unknown goal {goal!r}; valid: {sorted(GOAL_PROMPTS)}")
 
-    # Open JSONL sink for post-hoc summarizer. Default path matches the log
-    # file convention; pass jsonl_path='' to disable.
+    # Open JSONL sink for post-hoc summarizer. The path was resolved at the top
+    # of run() (shared with the recorder); pass jsonl_path='' to disable.
     jsonl_fh = None
-    if jsonl_path is None:
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        # Suffix with player name so concurrent rollouts don't collide on a
-        # shared timestamp.
-        jsonl_path = f"results/rollout-{goal}-{ts}-{_PLAYER_NAME}.jsonl"
     if jsonl_path:
         from pathlib import Path
         Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1203,6 +1211,7 @@ def run(
             "starting_loadout": starting_loadout,
             "model": model,
             "player": _PLAYER_NAME,
+            "video": video_path,
             "started_at": time.time(),
             "equipment_readout": _equipment_readout_enabled(),
             "armor_nudge_gating": _armor_nudge_gating_enabled(),
@@ -1687,6 +1696,10 @@ def run(
         f"mean={mean_plan:.1f}s/turn "
         f"wall={rollout_wall_s:.0f}s — agent was idle on LLM for {idle_pct:.0f}% of the rollout"
     )
+    # Finalize the screen recording (idempotent; atexit also covers the
+    # exception/early-return paths, and the fragmented mp4 survives a hard kill).
+    if recorder is not None:
+        recorder.stop()
     if jsonl_fh is not None:
         jsonl_fh.write(json.dumps({
             "_type": "end",
@@ -1733,7 +1746,13 @@ if __name__ == "__main__":
                     help="write per-turn JSONL to PATH (default: results/rollout-<goal>-<ts>.jsonl; '' to disable)")
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"LLM backend; gemma-* → Ollama, claude-* → Anthropic. Default: {DEFAULT_MODEL}")
+    ap.add_argument("--record-video", action="store_true",
+                    help="record the agent's screen (its Xvfb) to <jsonl-stem>.mp4 for the "
+                         "full rollout, spawn→terminal (sets CRAFT_RECORD_VIDEO; needs ffmpeg)")
     args = ap.parse_args()
+
+    if args.record_video:
+        os.environ["CRAFT_RECORD_VIDEO"] = "1"
 
     run(
         max_turns=args.turns,
