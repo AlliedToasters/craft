@@ -1013,6 +1013,33 @@ def _baritone_goto(
     return _post_homunculus("/baritone/goto", body, timeout=timeout_seconds + 10)
 
 
+def _baritone_follow(
+    follow_types: list[str],
+    *,
+    duration_seconds: int,
+    pickup: bool = True,
+    follow_radius: int = 2,
+) -> dict:
+    """Persistently pursue the nearest matching entity (+ collect drops) via
+    Baritone's FollowProcess. Blocks up to duration_seconds; homunculus stops
+    early once nothing matches (prey killed + drops swept).
+
+    This is the persistence-hunt primitive: Baritone re-paths to the fleeing mob
+    every tick (no LLM turn in the loop, so the ~0.5s plan latency stops letting
+    targets escape) while KillAura lands the kill, then walks onto the drops.
+    Returns the raw homunculus response.
+    """
+    body = {
+        "follow_types": follow_types,
+        "pickup": pickup,
+        "duration_seconds": duration_seconds,
+        "follow_radius": follow_radius,
+    }
+    print(f"  [follow] types={[t.split(':')[-1] for t in follow_types]} "
+          f"dur={duration_seconds}s pickup={pickup} radius={follow_radius}", flush=True)
+    return _post_homunculus("/baritone/follow", body, timeout=duration_seconds + 15)
+
+
 def _scan_blocks(
     x1: int, y1: int, z1: int, x2: int, y2: int, z2: int,
 ) -> dict:
@@ -3343,29 +3370,31 @@ def handle_sleep_in_bed(args: dict) -> str:
 
 _HUNT_DEFAULT_RADIUS = 32
 _HUNT_MAX_RADIUS = 64
-_HUNT_GOTO_TIMEOUT_S = 30          # path to mob; mobs wander so don't dawdle
-_HUNT_KILL_WAIT_S = 12.0           # post-arrival window for KillAura + pickup
-_HUNT_KILL_POLL_S = 1.0
+# Persistence-hunt window: Baritone FollowProcess chases the fleeing mob (KillAura
+# kills on contact) then sweeps drops, all mechanically (no LLM turn in the loop).
+# homunculus stops early once nothing matches, so this is a cap, not a fixed wait.
+_HUNT_FOLLOW_DURATION_S = 14
+_HUNT_FOLLOW_RADIUS = 2            # close to melee so KillAura reaches the target
 
 
 def handle_hunt_passive(args: dict) -> str:
-    """Pursue + kill the nearest passive mob via KillAura.
+    """Persistently pursue + kill the nearest passive mob, then collect drops.
 
     Flow:
       1. Snapshot drop-item inventory counts.
-      2. Find nearest passive (cow/pig/sheep/rabbit/chicken) within radius.
+      2. Scan for the nearest passive (cow/pig/sheep/rabbit/chicken) within
+         radius — fail fast as no_passives_in_range if none nearby.
       3. Enable KillAura's passive-mob attack (toggle Filter false).
-      4. /baritone/goto to the mob's last-known position.
-      5. Wait up to _HUNT_KILL_WAIT_S for inventory delta to show drops.
-      6. Restore KillAura's Filter (true = exclude passives) — always,
-         even on failure paths. KillAura is shared infra; leaving the
-         filter off would silently affect downstream tools.
-      7. Return "killed N, gained {item: count, ...}" or a FAILED reason.
-
-    Composes from existing primitives only — no new homunculus endpoints.
+      4. /baritone/follow the hunt species: Baritone FollowProcess re-paths to
+         the fleeing mob every tick (no LLM turn in the loop, so plan latency
+         can't let it escape) while KillAura kills on contact; pickup=True so it
+         also sweeps the drops. Blocks until the hunt resolves or the window ends.
+      5. Restore KillAura's Filter (true = exclude passives) — always, even on
+         failure paths. KillAura is shared infra; leaving the filter off would
+         silently affect downstream tools.
+      6. Return "hunted <species>: gained {...}" from the inventory delta, or a
+         FAILED reason.
     """
-    import time as _time
-
     radius = args.get("radius") if isinstance(args, dict) else None
     if not isinstance(radius, int):
         radius = _HUNT_DEFAULT_RADIUS
@@ -3379,20 +3408,10 @@ def handle_hunt_passive(args: dict) -> str:
             f"no_passives_in_range (radius={radius}); no cow/pig/sheep/"
             f"rabbit/chicken found — travel to plains or savanna and retry"
         )
-    target, species = found
-    # /scan_entities returns coords as a `position: [x, y, z]` list, NOT
-    # bare x/y/z fields. The 2026-05-21 fan-out caught this — Haiku
-    # called hunt_passive 4× but every attempt failed at this point.
-    pos = target.get("position")
-    if not isinstance(pos, list) or len(pos) < 3:
-        return f"FAILED: nearest {species} had no valid position ({target})"
-    if not all(isinstance(v, (int, float)) for v in pos[:3]):
-        return f"FAILED: nearest {species} position values not numeric ({pos})"
-    tx, ty, tz = int(pos[0]), int(pos[1]), int(pos[2])
-    dist = target.get("distance")
+    _target, species = found
     print(
-        f"  [hunt_passive] nearest {species} at ({tx},{ty},{tz}) "
-        f"dist={dist} — engaging",
+        f"  [hunt_passive] nearest {species} dist={_target.get('distance')} "
+        f"— engaging (follow+pickup)",
         flush=True,
     )
 
@@ -3409,39 +3428,27 @@ def handle_hunt_passive(args: dict) -> str:
         )
 
     try:
-        goto_res = _baritone_goto(
-            tx, ty, tz,
-            timeout_seconds=_HUNT_GOTO_TIMEOUT_S,
-            arrival_tolerance=2,
+        # Persistent pursuit: Baritone FollowProcess chases the nearest prey of
+        # any hunt species (re-pathing as it flees — no LLM turn in the loop, so
+        # the ~0.5s plan latency stops letting targets escape), KillAura kills on
+        # contact, then it sweeps the drops (pickup=True). The single static goto
+        # this replaced sent the player to where the mob *was* and stranded it.
+        # We follow the whole species set (not the one scanned mob) so it can
+        # switch to the next-nearest after each kill — multi-kill in one call.
+        follow_res = _baritone_follow(
+            list(_HUNT_SPECIES),
+            duration_seconds=_HUNT_FOLLOW_DURATION_S,
+            pickup=True,
+            follow_radius=_HUNT_FOLLOW_RADIUS,
         )
-        goto_ok = bool(goto_res.get("success"))
-        if not goto_ok:
+        if not follow_res.get("success"):
             print(
-                f"  [hunt_passive] goto returned non-success: "
-                f"{goto_res.get('reason','?')} / {goto_res.get('message','')[:80]}",
+                f"  [hunt_passive] follow returned non-success: "
+                f"{follow_res.get('reason','?')} / {follow_res.get('message','')[:80]}",
                 flush=True,
             )
-
-        # Wait for KillAura to do its thing + drops to fly into inventory.
-        # Poll inventory rather than scan_entities — the mob may already
-        # be dead by the time we arrive (KillAura works at range during
-        # travel) and drops are the authoritative "kill happened" signal.
-        t0 = _time.time()
-        last_delta_total = 0
-        while _time.time() - t0 < _HUNT_KILL_WAIT_S:
-            _time.sleep(_HUNT_KILL_POLL_S)
-            after = _inventory_drop_counts()
-            delta = {
-                k: after.get(k, 0) - before.get(k, 0)
-                for k in set(after) | set(before)
-            }
-            delta = {k: v for k, v in delta.items() if v > 0}
-            delta_total = sum(delta.values())
-            if delta_total > last_delta_total:
-                last_delta_total = delta_total
-                # Continue polling briefly to catch multi-kill bursts;
-                # don't return on the very first item.
-        # Final read for the report
+        # FollowProcess blocked until the hunt resolved (or the window elapsed);
+        # the inventory drop delta is the authoritative kill+collect signal.
         after = _inventory_drop_counts()
     finally:
         # Always restore. Even on exception paths — KillAura is shared
@@ -3463,12 +3470,12 @@ def handle_hunt_passive(args: dict) -> str:
     }
     delta = {k: v for k, v in delta.items() if v > 0}
     if not delta:
-        # Goto succeeded but no drops appeared. Either the mob fled out
-        # of KillAura range or the passive filter toggle didn't take.
+        # Follow ran but no drops appeared. Either the mob outran the pursuit
+        # window, KillAura never reached it, or the passive filter toggle failed.
         reason = "no_drops_observed"
         if not toggle_on.get("success"):
             reason += " (passive filter toggle failed — likely root cause)"
-        return f"FAILED: {reason} after engaging {species} at ({tx},{ty},{tz})"
+        return f"FAILED: {reason} after pursuing {species}"
 
     # Report drop tally sorted by count descending.
     parts = ", ".join(

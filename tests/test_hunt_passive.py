@@ -93,14 +93,14 @@ _UNSET = object()
 
 
 class TestCompositeFlow:
-    """Mock the network helpers and verify the scan → goto → poll →
+    """Mock the network helpers and verify the scan → follow(+pickup) →
     restore-filter state machine."""
 
     def _run(
         self,
         *,
         nearest=_UNSET,
-        goto_result=None,
+        follow_result=None,
         inv_seq=None,
         toggle_on=None,
         toggle_off=None,
@@ -108,21 +108,21 @@ class TestCompositeFlow:
     ):
         # `nearest` semantic: _UNSET → use a default cow target; None →
         # simulate "no passives found".
-        # /scan_entities returns entities with `position: [x, y, z]` —
-        # mock that exactly, not bare x/y/z fields.
         if nearest is _UNSET:
             nearest_val = (
                 {"position": [10, 64, 20], "distance": 8.0}, "minecraft:cow",
             )
         else:
             nearest_val = nearest
-        goto_result = goto_result if goto_result is not None else {"success": True}
-        # inv_seq: each call to _inventory_drop_counts returns the next
-        # snapshot. Final snapshot is the "after" used for the report.
+        follow_result = follow_result if follow_result is not None else {
+            "success": True, "reason": "targets_cleared",
+        }
+        # _inventory_drop_counts is read exactly twice now: before + after the
+        # follow call (FollowProcess blocks until the hunt resolves — there's no
+        # in-flight poll loop).
         inv_seq = inv_seq if inv_seq is not None else [
-            {},                                # before
-            {"minecraft:beef": 2},             # mid-poll
-            {"minecraft:beef": 2, "minecraft:leather": 1},  # final
+            {},                                            # before
+            {"minecraft:beef": 2, "minecraft:leather": 1},  # after
         ]
         inv_iter = iter(inv_seq)
 
@@ -140,15 +140,10 @@ class TestCompositeFlow:
             toggle_calls.append(on)
             return toggle_on if on else toggle_off
 
-        # Shrink the kill-wait window so the real-time loop terminates
-        # in milliseconds (time.sleep is mocked but time.time() still ticks).
         with patch.object(tools, "_nearest_passive", return_value=nearest_val), \
-             patch.object(tools, "_baritone_goto", return_value=goto_result), \
+             patch.object(tools, "_baritone_follow", return_value=follow_result), \
              patch.object(tools, "_inventory_drop_counts", side_effect=fake_inv), \
-             patch.object(tools, "_killaura_attack_passives", side_effect=fake_toggle), \
-             patch.object(tools, "_HUNT_KILL_WAIT_S", 0.05), \
-             patch.object(tools, "_HUNT_KILL_POLL_S", 0.01), \
-             patch("time.sleep", lambda *_a, **_k: None):
+             patch.object(tools, "_killaura_attack_passives", side_effect=fake_toggle):
             out = tools.handle_hunt_passive(args or {})
         return out, toggle_calls
 
@@ -230,25 +225,19 @@ class TestCompositeFlow:
             tools.handle_hunt_passive({"radius": 1})
         assert captured == [4]
 
-    def test_reads_position_list_not_xyz_fields(self):
-        """Regression for 2026-05-21: /scan_entities returns `position:
-        [x, y, z]` lists, not bare x/y/z fields. Earlier handler read
-        `target.get("x")` and short-circuited to FAILED on every kill.
-        Haiku called hunt_passive 4× during the first fan-out and every
-        one bounced off this bug."""
-        captured: list[tuple[int, int, int]] = []
+    def test_follow_called_with_species_set_and_pickup(self):
+        """Persistence-hunt rewrite: drives Baritone FollowProcess over the
+        whole hunt species set (so it can switch to the next-nearest mob after
+        a kill — multi-kill in one call) with pickup=True to sweep drops, rather
+        than a single static goto to one scanned mob."""
+        captured: dict = {}
 
-        def fake_goto(x, y, z, *, timeout_seconds=30, arrival_tolerance=2):
-            captured.append((x, y, z))
-            return {"success": True}
+        def fake_follow(follow_types, *, duration_seconds, pickup=True, follow_radius=2):
+            captured["types"] = list(follow_types)
+            captured["pickup"] = pickup
+            return {"success": True, "reason": "targets_cleared"}
 
-        # Sticky inventory mock — short window mocked, the polling loop
-        # may iterate a few times before the loop's real-time deadline.
-        inv_calls = [0]
-
-        def fake_inv():
-            inv_calls[0] += 1
-            return {} if inv_calls[0] == 1 else {"minecraft:beef": 2}
+        inv = iter([{}, {"minecraft:beef": 2}])
 
         with patch.object(
             tools, "_nearest_passive",
@@ -257,30 +246,32 @@ class TestCompositeFlow:
                 "minecraft:cow",
             ),
         ), \
-             patch.object(tools, "_baritone_goto", side_effect=fake_goto), \
-             patch.object(tools, "_inventory_drop_counts", side_effect=fake_inv), \
+             patch.object(tools, "_baritone_follow", side_effect=fake_follow), \
+             patch.object(
+                tools, "_inventory_drop_counts",
+                side_effect=lambda: next(inv, {"minecraft:beef": 2}),
+            ), \
              patch.object(
                 tools, "_killaura_attack_passives",
                 return_value={"success": True},
-            ), \
-             patch.object(tools, "_HUNT_KILL_WAIT_S", 0.05), \
-             patch.object(tools, "_HUNT_KILL_POLL_S", 0.01), \
-             patch("time.sleep", lambda *_a, **_k: None):
+            ):
             out = tools.handle_hunt_passive({})
 
         assert "hunted minecraft:cow" in out
         assert "FAILED" not in out
-        assert captured == [(123, 64, 456)], (
-            f"goto should have been called with extracted position; got {captured}"
+        assert set(captured["types"]) == set(tools._HUNT_SPECIES), (
+            f"follow should target the full hunt species set; got {captured['types']}"
         )
+        assert captured["pickup"] is True
 
-    def test_goto_failure_still_polls_for_drops(self):
-        """KillAura may have killed the mob at range during travel even
-        if Baritone reports timeout — the drops are still the signal."""
+    def test_follow_failure_still_reports_drops(self):
+        """KillAura may have killed the mob even if FollowProcess returns a
+        non-success (busy/internal) — the inventory drop delta is the real
+        kill signal, not the follow status."""
         out, toggles = self._run(
-            goto_result={"success": False, "reason": "timeout"},
+            follow_result={"success": False, "reason": "busy"},
         )
-        # Drops appeared (mocked inventory delta) → success despite goto.
+        # Drops appeared (mocked inventory delta) → success despite follow status.
         assert "hunted minecraft:cow" in out
         assert toggles == [True, False]
 
