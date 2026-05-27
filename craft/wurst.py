@@ -215,6 +215,35 @@ def set_food_policy(mode: str, *, verbose: bool = True, timeout: float = 5.0) ->
     return r
 
 
+def set_wurst_hud(visible: bool, *, verbose: bool = True, timeout: float = 5.0) -> dict:
+    """POST /wurst/hud — show/hide Wurst's on-screen HUD (logo/hacklist/TabGui).
+
+    The Wurst HUD is debug-only clutter on recorded rollouts, so preflight hides
+    it (visible=False). homunculus already defaults it hidden, but setting it
+    explicitly keeps the policy owned Python-side and deterministic regardless of
+    the jar's default. Returns {success, visible, wurst_loaded} or a transport
+    error dict; never raises.
+    """
+    try:
+        resp = requests.post(
+            f"{HOMUNCULUS_BASE}/wurst/hud",
+            json={"visible": visible},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        r = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        r = {"success": False, "reason": "transport_error", "message": str(e)}
+    if verbose:
+        if r.get("success"):
+            loaded = "" if r.get("wurst_loaded", True) else " (wurst not loaded — no visible effect)"
+            print(f"[wurst_hud] visible={r.get('visible')}{loaded}", flush=True)
+        else:
+            print(f"[wurst_hud] FAILED ({r.get('reason')}): {r.get('message', '')[:100]}",
+                  flush=True)
+    return r
+
+
 def seed_autodrop_from_tier(tier: str, *, verbose: bool = True) -> dict:
     """Push the autodrop policy's drop-list-for-tier into AutoDrop.Items.
 

@@ -1123,13 +1123,19 @@ def _apply_setup(
     # stages policy-approved food there. CRAFT_FOOD_POLICY=cooked_only keeps raw meat
     # out of the offhand so it can't be auto-eaten before the agent cooks it; default
     # `any` preserves daily-driver behavior (raw meat still feeds the agent).
-    from craft.wurst import set_autoeat_offhand_mode, set_food_policy, set_killaura_no_pvp
+    from craft.wurst import (
+        set_autoeat_offhand_mode, set_food_policy, set_killaura_no_pvp, set_wurst_hud,
+    )
     wurst_report["autoeat_offhand"] = set_autoeat_offhand_mode()
     food_policy = os.environ.get("CRAFT_FOOD_POLICY", "any")
     wurst_report["food_policy"] = set_food_policy(food_policy)
     # Fleet hygiene: stop KillAura from PvP-ing other agents (this build defaults
     # the player filter OFF). Client-side, no server.properties change.
     wurst_report["killaura_no_pvp"] = set_killaura_no_pvp()
+    # Wurst HUD (logo/hacklist/TabGui) is debug-only clutter on recorded
+    # rollouts — hide it. CRAFT_WURST_HUD=1 re-enables it for a debug session.
+    wurst_hud_on = os.environ.get("CRAFT_WURST_HUD", "0").strip().lower() in ("1", "true", "on", "yes")
+    wurst_report["wurst_hud"] = set_wurst_hud(wurst_hud_on)
 
     # AutoDrop policy seeding. With AutoDrop now in REQUIRED_HACKS the module
     # itself is on; this step writes the whitelist-complement drop list into
