@@ -140,6 +140,30 @@ LOADOUTS: dict[str, dict] = {
             ("minecraft:beef",         8),   # raw beef — hidden from AutoEat
         ],
     },
+    # Hunt+cook composition: the full hunt → cook → eat chain in one
+    # scenario. Pre-summoned herd (hunt targets) + furnace + coal (the cook
+    # means) + sword/torches (survival), hunger=2 pressure. The agent must
+    # hunt for raw meat, place the furnace, smelt it, then eat the output.
+    #
+    # MUST run with CRAFT_FOOD_POLICY=cooked_only. Under cooked_only the
+    # offhand-food curator refuses to stage raw meat, so the dynamically
+    # picked-up raw drops are NEVER auto-eaten (closing hunt_meadow's leak
+    # where raw meat is auto-eaten for ~nothing). Only after the agent cooks
+    # does AutoEat top up from the cooked output — which makes food level a
+    # *meaningful* efficacy signal here, unlike the hunt-only loadouts. No
+    # main_inv_only needed: the meat arrives from the kill, not from /give,
+    # and cooked_only protects it regardless of which slot it lands in.
+    "hunt_kitchen": {
+        "pre_summon_herd": True,
+        "set_hunger": 2,
+        "armor": {},
+        "main": [
+            ("minecraft:coal",         8),
+            ("minecraft:furnace",      1),
+            ("minecraft:stone_sword",  1),
+            ("minecraft:torch",        8),
+        ],
+    },
 }
 
 

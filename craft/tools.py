@@ -955,6 +955,44 @@ def _collect_smelt_raw(furnace_pos: list[int] | None = None) -> dict:
 # "multiple waypoints were found". Coord-based goto avoids that entirely.
 _HOME_POS: tuple[int, int, int] | None = None
 
+# Last furnace the cook/smelt chain used, remembered so a re-cook can walk
+# back to it. /smelt only reuses a furnace within Smelts.FURNACE_REACH (4
+# blocks) of the player's CURRENT spot; once the first cook places the furnace
+# and the agent roams off (e.g. to hunt), the furnace item is spent and a
+# re-cook fails not_in_inventory. /smelt_status drops EMPTY/DESTROYED furnaces
+# after surfacing once, so it can't be the sole source — this in-memory
+# fallback covers a fully-drained furnace the registry has already forgotten.
+_LAST_FURNACE_POS: tuple[int, int, int] | None = None
+
+
+def _remember_furnace(fp: object) -> None:
+    """Record a furnace [x,y,z] as the last-used one (no-op on bad input)."""
+    global _LAST_FURNACE_POS
+    if isinstance(fp, list) and len(fp) == 3:
+        try:
+            _LAST_FURNACE_POS = (int(fp[0]), int(fp[1]), int(fp[2]))
+        except (TypeError, ValueError):
+            pass
+
+
+def _known_furnace_pos() -> list[int] | None:
+    """Best-effort [x,y,z] of an already-placed furnace to reuse.
+
+    /smelt_status first (authoritative while a smelt is live), then the
+    in-memory last-used furnace. Returns None if neither is available.
+    """
+    status_resp = _get_homunculus("/smelt_status")
+    for s in (status_resp or {}).get("smelts") or []:
+        fp = s.get("furnace_pos")
+        if isinstance(fp, list) and len(fp) == 3:
+            try:
+                return [int(fp[0]), int(fp[1]), int(fp[2])]
+            except (TypeError, ValueError):
+                continue
+    if _LAST_FURNACE_POS is not None:
+        return [int(_LAST_FURNACE_POS[0]), int(_LAST_FURNACE_POS[1]), int(_LAST_FURNACE_POS[2])]
+    return None
+
 
 def _baritone_goto(
     x: int,
@@ -3554,6 +3592,27 @@ def handle_cook_meat(args: dict) -> str:
         flush=True,
     )
 
+    # Reuse an already-placed furnace instead of demanding a fresh one.
+    # /smelt only reuses a furnace within 4 blocks of the player's current
+    # spot; after the first cook places the furnace and the agent roams off,
+    # the furnace item is spent and a re-cook fails not_in_inventory. The
+    # collect leg already walks back to the registered furnace (/collect_smelt
+    # below) — mirror that on the ignite leg. Only needed when we hold no
+    # furnace item to place a fresh one; otherwise /smelt's own auto-place is
+    # fine and a needless walk would waste a turn.
+    if inv_counts.get("minecraft:furnace", 0) == 0:
+        furnace_pos = _known_furnace_pos()
+        if furnace_pos is not None:
+            print(
+                f"  [cook_meat] no furnace in inventory; walking to known "
+                f"furnace {furnace_pos} to reuse it",
+                flush=True,
+            )
+            _baritone_goto(
+                furnace_pos[0], furnace_pos[1], furnace_pos[2],
+                timeout_seconds=60, arrival_tolerance=2,
+            )
+
     # Kick the smelt. /smelt auto-places the furnace if one isn't nearby
     # (uses 8 cobblestone) — that's the substrate piece the LLM was
     # missing when composing place+smelt manually.
@@ -3579,6 +3638,11 @@ def handle_cook_meat(args: dict) -> str:
         _time.sleep(poll_interval)
         status_resp = _get_homunculus("/smelt_status")
         smelts = (status_resp or {}).get("smelts") or []
+        if smelts:
+            # Remember this furnace while it's still in the registry — once
+            # drained it drops out of /smelt_status, so capture it now to
+            # back the goto-to-furnace reuse on the next cook.
+            _remember_furnace(smelts[0].get("furnace_pos"))
         ready = [s for s in smelts if s.get("status") in ("ready", "partial", "stale")]
         if ready:
             break
@@ -3603,6 +3667,7 @@ def handle_cook_meat(args: dict) -> str:
             f"{collect_res.get('reason', 'unknown')} "
             f"({collect_res.get('message', '')[:120]})"
         )
+    _remember_furnace(collect_res.get("furnace_pos"))
 
     # Successful collect — quantify by re-reading inventory delta on
     # the cooked_* id. cooked_beef from beef, cooked_porkchop from
