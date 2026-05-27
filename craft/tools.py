@@ -682,6 +682,32 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "description": (
+                "Idle in place for `seconds` (1–60, default 15) instead of "
+                "acting. Time still passes for the world: a furnace keeps "
+                "cooking and the cooked food is auto-eaten when you get "
+                "hungry, mobs wander into KillAura range, and the evasion / "
+                "water reflexes still protect you. Use it to loiter by a "
+                "furnace until your meat finishes cooking rather than running "
+                "off, or to let AutoEat top you up. Costs one turn; returns a "
+                "food before→after delta and whether a furnace is now ready."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {
+                        "type": "integer",
+                        "description": "How long to wait, in seconds (1–60, default 15).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -3714,6 +3740,67 @@ def handle_look_around(args: dict) -> str:
     )
 
 
+_WAIT_DEFAULT_S = 15
+_WAIT_MAX_S = 60
+
+
+def _wait_snapshot() -> tuple[object, set]:
+    """(food, {furnace_pos tuples with collectable output}) for wait() deltas."""
+    stats = _get_homunculus("/stats") or {}
+    food = stats.get("food")
+    status = _get_homunculus("/smelt_status") or {}
+    ready = {
+        tuple(s["furnace_pos"])
+        for s in (status.get("smelts") or [])
+        if s.get("status") in ("ready", "partial", "stale")
+        and isinstance(s.get("furnace_pos"), list) and len(s["furnace_pos"]) == 3
+    }
+    return food, ready
+
+
+def handle_wait(args: dict) -> str:
+    """Idle in place for `seconds` (clamped 1–60, default 15).
+
+    A deliberate "stay put and let the world advance" action. Everything that
+    matters is substrate-side and keeps running while the LLM turn is parked:
+    a furnace finishes cooking, the offhand-food curator stages the cooked
+    output and AutoEat eats it, mobs wander into KillAura range, and the
+    evasion / water-aversion reflexes still fire. The canonical use is
+    loitering by a furnace until the meat is cooked + auto-eaten instead of
+    running off (which is the real mistake). Reports a before→after delta so
+    the wait yields signal — a blindly-starving agent sees food isn't moving.
+    """
+    import time as _time
+
+    requested = args.get("seconds") if isinstance(args, dict) else None
+    try:
+        seconds = int(requested) if requested is not None else _WAIT_DEFAULT_S
+    except (TypeError, ValueError):
+        seconds = _WAIT_DEFAULT_S
+    seconds = max(1, min(seconds, _WAIT_MAX_S))
+
+    food_before, ready_before = _wait_snapshot()
+    print(f"  [wait] idling {seconds}s (food={food_before})...", flush=True)
+    _time.sleep(seconds)
+    food_after, ready_after = _wait_snapshot()
+
+    parts = [f"waited {seconds}s"]
+    if isinstance(food_before, (int, float)) and isinstance(food_after, (int, float)):
+        if food_after != food_before:
+            parts.append(f"food {food_before}→{food_after}")
+        else:
+            parts.append(f"food {food_after} (unchanged)")
+    newly_ready = ready_after - ready_before
+    if newly_ready:
+        parts.append(
+            "a furnace now has cooked output ready — wait() again to let "
+            "AutoEat take it, or call collect_smelt()"
+        )
+    elif ready_after:
+        parts.append("furnace still cooking")
+    return "; ".join(parts)
+
+
 HANDLERS = {
     "mine_wood": handle_mine_wood,
     "mine_stone": handle_mine_stone,
@@ -3734,6 +3821,7 @@ HANDLERS = {
     "sleep_in_bed": handle_sleep_in_bed,
     "hunt_passive": handle_hunt_passive,
     "cook_meat": handle_cook_meat,
+    "wait": handle_wait,
 }
 
 
