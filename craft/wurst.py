@@ -50,6 +50,15 @@ SYSTEM_HACKS: tuple[str, ...] = (
 
 REQUIRED_HACKS: tuple[str, ...] = SURVIVAL_HACKS + OBSERVER_HACKS + SYSTEM_HACKS
 
+# Hacks that must be OFF every rollout. Wurst persists hack on/off state per
+# profile, so a stale toggle survives client relaunches — and ensure_hacks_on
+# only ever turns things ON. Sneak (perpetual crouch) got left enabled while
+# debugging block placement; it caps movement at ~1.3 m/s and makes Baritone
+# pathing crawl, silently degrading every agent. Force it off so a persisted
+# toggle can't cripple the fleet again. (Scoped placement-sneak is handled
+# correctly inside homunculus's Placer/BedPlacer; global Sneak is never wanted.)
+FORBIDDEN_HACKS: tuple[str, ...] = ("Sneak",)
+
 
 def set_hack(name: str, enabled: bool, *, timeout: float = 5.0) -> dict:
     """POST /wurst/hack. Returns the parsed response dict (always a dict).
@@ -333,6 +342,49 @@ def ensure_hacks_on(
         "wurst_loaded": wurst_loaded,
         "results": results,
         "status_snapshot": snap,
+    }
+
+
+def ensure_hacks_off(
+    names: tuple[str, ...] = FORBIDDEN_HACKS,
+    *,
+    verbose: bool = True,
+) -> dict:
+    """Disable each hack in `names`, return a report. Counterpart to
+    ensure_hacks_on for hacks that must stay OFF.
+
+    Wurst persists hack state across launches, so a stale toggle (e.g. Sneak
+    left on during placement debugging) survives every relaunch and degrades
+    the agent. This forces them off at preflight. Never raises.
+
+    Report shape mirrors ensure_hacks_on (sans status_snapshot).
+    """
+    results: list[dict] = []
+    wurst_loaded = True
+    for name in names:
+        r = set_hack(name, False)
+        ok = bool(r.get("success")) and not r.get("enabled", False)
+        if r.get("reason") == "wurst_not_loaded":
+            wurst_loaded = False
+        entry = {
+            "name": name,
+            "enabled": bool(r.get("enabled")),
+            "changed": bool(r.get("changed")),
+            "ok": ok,
+            "raw": r,
+        }
+        results.append(entry)
+        if verbose:
+            tag = "OK" if ok else "FAIL"
+            extra = " (already off)" if ok and not entry["changed"] else ""
+            reason = r.get("reason")
+            if not ok and reason:
+                extra = f" reason={reason} msg={r.get('message', '')[:80]}"
+            print(f"[wurst] {tag} {name} forced-off{extra}", flush=True)
+    return {
+        "ok": all(r["ok"] for r in results),
+        "wurst_loaded": wurst_loaded,
+        "results": results,
     }
 
 

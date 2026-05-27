@@ -38,6 +38,7 @@ from craft.world import (
     set_time,
 )
 from craft.wurst import ensure_hacks_on as ensure_wurst_hacks_on
+from craft.wurst import ensure_hacks_off as ensure_wurst_hacks_off
 from craft.wurst import seed_autodrop_from_tier as _seed_autodrop_from_tier
 
 
@@ -1117,6 +1118,9 @@ def _apply_setup(
     # landed, these depended on the player having toggled them in the UI; a
     # missed click silently invalidated rollout outcomes.
     wurst_report = ensure_wurst_hacks_on()
+    # Force unwanted persisted hacks OFF (Wurst saves hack state per profile, so a
+    # stale toggle survives relaunches). Sneak left on cripples movement/pathing.
+    wurst_report["forbidden_off"] = ensure_wurst_hacks_off()
 
     # AutoEat offhand-only eating + food policy. AutoEat is pinned to Hands mode
     # (eats only from the offhand/held slot), and homunculus's offhand-food curator
