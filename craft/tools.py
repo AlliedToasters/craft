@@ -3688,10 +3688,34 @@ def handle_cook_meat(args: dict) -> str:
     # multi-stack cooks.
     collect_res = _collect_smelt_raw()
     if not collect_res.get("success"):
+        reason = collect_res.get("reason", "unknown")
+        # The cook started fine but isn't collectable yet — the furnace is still
+        # cooking. That's NOT a failure: it's the valid "wait by the furnace and
+        # eat when ready" play (the agent naturally re-polls cook_meat). Return a
+        # non-FAILED, informative line with the ETA so the re-poll reads as
+        # progress, not a loss — and AutoEat pulls the cooked output from the
+        # offhand the moment it's ready, so no explicit collect is even required.
+        if reason in ("nothing_ready", "no_active_smelts"):
+            status_resp = _get_homunculus("/smelt_status")
+            cooking = [
+                s for s in (status_resp or {}).get("smelts") or []
+                if s.get("status") in ("cooking", "partial")
+            ]
+            if cooking:
+                s0 = cooking[0]
+                fp = s0.get("furnace_pos") or [0, 0, 0]
+                _remember_furnace(fp)
+                eta = s0.get("eta_seconds")
+                eta_str = f"~{int(eta)}s" if isinstance(eta, (int, float)) else "a few more seconds"
+                return (
+                    f"cooking {count}x {meat.split(':', 1)[-1]} at furnace "
+                    f"({fp[0]},{fp[1]},{fp[2]}); {eta_str} left — it auto-eats from "
+                    f"your offhand the moment it's ready. wait() nearby, or call "
+                    f"cook_meat()/collect_smelt() again shortly."
+                )
         return (
             f"FAILED: smelt started but collect failed: "
-            f"{collect_res.get('reason', 'unknown')} "
-            f"({collect_res.get('message', '')[:120]})"
+            f"{reason} ({collect_res.get('message', '')[:120]})"
         )
     _remember_furnace(collect_res.get("furnace_pos"))
 
