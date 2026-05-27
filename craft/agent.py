@@ -1225,6 +1225,7 @@ def run(
             "model": model,
             "player": _PLAYER_NAME,
             "video": video_path,
+            "video_started_at": recorder.started_at if recorder is not None else None,
             "started_at": time.time(),
             "equipment_readout": _equipment_readout_enabled(),
             "armor_nudge_gating": _armor_nudge_gating_enabled(),
@@ -1354,6 +1355,7 @@ def run(
 
     for turn in range(1, max_turns + 1):
         turn_start = time.perf_counter()
+        turn_wall_start = time.time()  # epoch anchor for post-hoc video overlay
         milestone_event = None
         print(f"\n=== turn {turn}/{max_turns}: planning ===")
         plan_start = time.perf_counter()
@@ -1466,6 +1468,7 @@ def run(
                 jsonl_fh.write(json.dumps({
                     "_type": "turn",
                     "turn": turn,
+                    "t": turn_wall_start,
                     "tool": name,
                     "args": args,
                     "outcome": "aborted_pre_dispatch_due_to_death",
@@ -1655,6 +1658,7 @@ def run(
             rec = {
                 "_type": "turn",
                 "turn": turn,
+                "t": turn_wall_start,
                 "tool": name,
                 "args": args,
                 "outcome": outcome,

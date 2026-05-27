@@ -138,6 +138,7 @@ class RolloutRecorder:
         self.crf = crf
         self.region = region
         self.proc: subprocess.Popen | None = None
+        self.started_at: float | None = None  # epoch of ffmpeg launch ≈ video t=0
         self._stopped = False
         self._discarded = False
 
@@ -181,6 +182,10 @@ class RolloutRecorder:
             print(f"[recorder] failed to start ffmpeg: {e}", flush=True)
             self.proc = None
             return False
+        # x11grab begins capturing within a fraction of a second of Popen, so
+        # this epoch is the anchor for video t=0 — post-hoc overlays map a turn's
+        # wall-clock `t` to video time via (t - started_at).
+        self.started_at = time.time()
         atexit.register(self.stop)  # safety net for the exception/return paths
         reg = f" region={self.region}" if self.region else " (full display)"
         print(f"[recorder] recording {self.display}{reg} @ {self.fps}fps → {self.path}", flush=True)
