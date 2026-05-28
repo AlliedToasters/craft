@@ -186,6 +186,53 @@ LOADOUTS: dict[str, dict] = {
             ("minecraft:torch",          8),
         ],
     },
+    # Iron→bed end-to-end capability isolation: agent must complete the
+    # wool-bedding tech tree from raw materials. Starts at dusk with the
+    # exact minimum to win: 2 iron_ingot (1 shears), 8 oak_planks (3 for
+    # bed crafting + buffer), a crafting_table, plus a FULL iron tool
+    # kit. NO bed, NO shears, NO wool, NO armor (the test is about
+    # bedding, not survival ceiling).
+    #
+    # Why the full iron tool set: the first run of this loadout (2026-05-28)
+    # showed agents getting trapped digging dirt/mining stone/grinding the
+    # wood→stone→iron tool tree instead of pursuing bed. Iron tools remove
+    # the tool-grind confound so the rollout MEASURES the bedding decision,
+    # not "did the agent reach iron tier?"
+    #
+    # Sheep are pre-summoned at radius 15 (outside KillAura's ~5-block
+    # reach so they don't auto-die on spawn) — agent must walk to them.
+    # Successful chain: shear_sheep (auto-crafts shears) → wool drops →
+    # craft bed → place bed → sleep_in_bed. No pre_shelter — surviving
+    # dusk is part of the test; the bed is the substrate's answer to night.
+    "dusk_iron_to_bed": {
+        "pre_summon_sheep": True,
+        # Full iron armor: removes the "I should mine more iron for armor"
+        # pull. Combined with excess iron_ingot below, there is nothing
+        # more for the agent to want from the iron tree — if they still
+        # don't reach for bed, the gap is unambiguously the missing
+        # substrate signal, not unmet iron-tier desire.
+        "armor": {
+            "head":  "minecraft:iron_helmet",
+            "chest": "minecraft:iron_chestplate",
+            "legs":  "minecraft:iron_leggings",
+            "feet":  "minecraft:iron_boots",
+        },
+        "main": [
+            # Excess iron — 16 ingots is 8× the shears requirement. Combined
+            # with full iron armor + tools, the agent has nothing material
+            # to gain from continued iron-tier work; smelt-loop strategies
+            # cease to be productive.
+            ("minecraft:iron_ingot",    16),
+            ("minecraft:oak_planks",     8),   # 3 needed for bed, buffer for second craft
+            ("minecraft:crafting_table", 1),
+            ("minecraft:iron_pickaxe",   1),
+            ("minecraft:iron_axe",       1),
+            ("minecraft:iron_shovel",    1),
+            ("minecraft:iron_sword",     1),
+            ("minecraft:cooked_beef",    8),
+            ("minecraft:torch",          8),
+        ],
+    },
 }
 
 
@@ -213,6 +260,22 @@ _HERD_RING: list[tuple[str, int, int]] = [
     # W cluster
     ("minecraft:sheep",  -20,   0),
     ("minecraft:chicken",-20,  -2),
+]
+
+
+# Pre-summon ring for dusk_iron_to_bed. 6 sheep at radius 15 — far enough
+# from KillAura (~5 block reach) that none die on spawn, close enough that
+# look_around(r=1) sees them and a single walk-toward-cardinal-direction
+# brings them into shear range. Slight offsets (e.g. 15/2) avoid stacking
+# multiple mobs on the exact same block which the server occasionally
+# rejects.
+_SHEEP_RING: list[tuple[str, int, int]] = [
+    ("minecraft:sheep",   15,   0),   # E
+    ("minecraft:sheep",   13,   3),
+    ("minecraft:sheep",    0,  15),   # N
+    ("minecraft:sheep",   -3,  13),
+    ("minecraft:sheep",  -15,   0),   # W
+    ("minecraft:sheep",    0, -15),   # S
 ]
 
 
@@ -312,6 +375,48 @@ def apply_loadout(
                     "ok": spawned_n == len(_HERD_RING),
                     "spawned": spawned_n,
                     "total": len(_HERD_RING),
+                    "ring": ring_results,
+                },
+            })
+
+    # Optional pre-summon step: sheep-only ring (dusk_iron_to_bed). Same
+    # shape as pre_summon_herd but uses _SHEEP_RING — radius 15 sheep at
+    # six positions around the agent. KillAura's ~5 block reach can't hit
+    # them on spawn; agent has to walk over to engage.
+    if spec.get("pre_summon_sheep"):
+        pos = _fetch_player_pos(HOMUNCULUS_BASE)
+        if pos is None:
+            print(
+                "[loadout] pre_summon_sheep FAILED: couldn't fetch player position",
+                flush=True,
+            )
+            report["steps"].append({
+                "step": "pre_summon_sheep",
+                "result": {"ok": False, "error": "position_fetch_failed"},
+            })
+        else:
+            px, py, pz = pos
+            ring_results = []
+            for entity_id, dx, dz in _SHEEP_RING:
+                res = summon_at(
+                    entity_id, px + dx, py, pz + dz,
+                    server_cmd_base=server_cmd_base,
+                )
+                ring_results.append({
+                    "entity": entity_id, "offset": [dx, dz], "result": res,
+                })
+            spawned_n = sum(1 for r in ring_results if r["result"].get("ok"))
+            print(
+                f"[loadout] pre_summon_sheep: spawned {spawned_n}/{len(_SHEEP_RING)} "
+                f"sheep around ({px:.1f},{py:.1f},{pz:.1f})",
+                flush=True,
+            )
+            report["steps"].append({
+                "step": "pre_summon_sheep",
+                "result": {
+                    "ok": spawned_n == len(_SHEEP_RING),
+                    "spawned": spawned_n,
+                    "total": len(_SHEEP_RING),
                     "ring": ring_results,
                 },
             })
