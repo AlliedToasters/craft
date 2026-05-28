@@ -613,15 +613,30 @@ frame drives essentially the entire gain; `g_t` adds ~nothing. Mechanism:
 separates per-tick Baritone path rotation from cadenced mining swings. R0
 collapses to the majority class (swing).
 
-**Scope caveat.** This does **not** refute §8c's goal-helps prediction — that
-prediction is about `interact` / `player_command` (offensive vs activating
-intent), which are nearly absent in mining rollouts (interact=0, player_command=2
-in val). The regime where `g_t` should matter is simply not exercised here.
-Testing it needs combat/interaction-varied rollouts. Combined with the §8a
-caveat (Qwen's `g_t` collapses to the tool name), the goal channel is so far
-**unfalsified-because-untested**, not unhelpful. The plumbing — capture →
-join → rung-gated features → goal vocab → per-type metrics — is end-to-end
-validated.
+**Combat-regime test (the §8c prediction, now exercised).** A second capture —
+`survive` goal, spawned at `midnight`, easy difficulty — generated the missing
+types (interact 260, player_command 156, 7 distinct goals; 8757 packets,
+`results/frozen_combat`). Discriminator ablation: R0 0.522 → R1_goal 0.545
+(**+0.023**) → R1_temporal 0.775 (**+0.252**) → R1_full 0.781. **Same pattern:
+`g_t` adds ~nothing; temporal dominates.** Critically, on `interact` itself:
+R0 0.000 → R1_goal **0.000** → R1_temporal 0.116. **The goal channel does not
+help predict interact at all.**
+
+Mechanism — and the redirect: interact fires *during* `mine_wood`/`craft` (the
+goal active when a mob wanders into KillAura range), so it is **mob-proximity-
+driven, not goal-driven**. The substrate (Wurst KillAura) decouples combat
+packets from LLM intent. So the predictive signal for interact is `entity_set`
+(R3), **not** `g_t` (R1) — a concrete pre-registration flip for the R3 rung.
+
+**Precision on scope.** This is the *discriminator* (predict that the next
+packet is an interact). §8c's literal claim is about the interact *action-enum*
+(ATTACK vs INTERACT vs INTERACT_AT) — a parameter head, not yet built. The
+discriminator null + the KillAura mechanism make the enum claim unlikely to
+hold, but it remains formally untested until heads land. Net: §8c's
+goal-helps-discriminator prediction is **falsified in this substrate**; the
+goal-helps-enum prediction is downgraded to unlikely. The plumbing — capture →
+100% tick-join → rung-gated features → goal vocab → per-type metrics — is
+end-to-end validated across two regimes.
 
 ### 8d. Per-type metrics
 

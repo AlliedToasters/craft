@@ -197,6 +197,7 @@ def run_capture(args: argparse.Namespace) -> dict:
         "agent": {
             "turns": args.turns, "goal": args.goal,
             "spawn_range": args.spawn_range,
+            "start_phase": args.start_phase, "difficulty": args.difficulty,
         },
         "rollouts": [],
         "notes": [
@@ -234,6 +235,8 @@ def run_capture(args: argparse.Namespace) -> dict:
             str(args.turns), args.goal,
             "--model", args.model,
             "--random-spawn-range", str(args.spawn_range),
+            "--start-phase", args.start_phase,
+            "--difficulty", args.difficulty,
             "--jsonl-out", str(agent_path),
         ]
         t0 = time.time()
@@ -312,6 +315,10 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=25570)
     ap.add_argument("--player", default="agent0")
     ap.add_argument("--spawn-range", type=int, default=5000)
+    ap.add_argument("--start-phase", default="none",
+                    choices=["dawn", "noon", "dusk", "midnight", "random", "none"])
+    ap.add_argument("--difficulty", default="easy",
+                    choices=["peaceful", "easy", "normal", "hard"])
     ap.add_argument("--out", default="results/frozen_dryrun")
     ap.add_argument("--purpose", default="dry_run")
     run_capture(ap.parse_args())
