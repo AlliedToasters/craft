@@ -150,6 +150,96 @@ CHEATSHEET.md         # developer-side notes: rollout flags, human driver, fleet
 CLAUDE.md             # project context for Claude Code sessions
 ```
 
+## Codec / neural output (ml.MD §4a)
+
+Forward-looking, not wired into the current LLM agent. The Phase 2 experiment
+replaces Mojang's byte `StreamCodec` with a structured tagged-union action
+representation that doubles as the neural head's output shape — same type by
+construction in training (heuristic packets → labels) and inference (neural
+prediction → packet). Round-trip invariant:
+`decode(encode(packet, obs), obs) ≈ packet`. See [`ml.MD`](ml.MD) §4a for the
+full design.
+
+The output hierarchy:
+
+```
+              ┌────────────────────────────────────────┐
+              │  packet_type   categorical · 1-of-11   │   tagged-union
+              │                (always fires)          │   discriminator
+              └─────────────────────┬──────────────────┘
+                                    │
+                                    ▼
+                  conditioned on packet_type, a per-type
+                  parameter-head bundle fires. The four
+                  most structurally interesting codecs:
+
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ move  ·  4 wire types: pos / pos_rot / rot / status_only             │
+  │   pos          Δ3f vs obs       fires per wire-type variant          │
+  │   rot          2f absolute      fires per wire-type variant          │
+  │   on_ground    ▫                                                     │
+  │   h_coll       ▫                                                     │
+  └──────────────────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ use_item_on  ·  right-click on a block (place / activate)            │
+  │   hand          ▪×2                                                  │
+  │   block_pos     ☆   pointer gap                                      │
+  │   face          ▪×6                                                  │
+  │   cursor        3f  ∈ [0,1]³  block-relative                         │
+  │   inside        ▫                                                    │
+  │   world_border  ▫                                                    │
+  │   ⟦sequence⟧                                                         │
+  └──────────────────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ interact  ·  attack / interact / interact-at on an entity            │
+  │   entity_id          ☆    pointer gap                                │
+  │   action             ▪×3  ATTACK / INTERACT / INTERACT_AT            │
+  │   using_2nd_action   ▫                                               │
+  │   hand        opt    ▪×2  fires only on INTERACT / INTERACT_AT       │
+  │   at          opt    3f   fires only on INTERACT_AT                  │
+  └──────────────────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ player_action  ·  dig-lifecycle (spatial) + inventory edges          │
+  │   action        ▪×7   3 dig-lifecycle (spatial)                      │
+  │                       + 4 inventory edges (non-spatial)              │
+  │   block_pos     ☆     spatial only — non-spatial: sentinel zero      │
+  │   face          ▪×6   spatial only — non-spatial: sentinel DOWN      │
+  │   ⟦sequence⟧                                                         │
+  └──────────────────────────────────────────────────────────────────────┘
+
+  Remaining 4 codecs (categoricals + booleans, no pointer gap):
+    swing            hand                          ▪×2
+    player_input     7 movement booleans           ▫ × 7
+    player_command   action + entity_id + data     ▪×9 + ☆ + scalar int
+    use_item         hand + look angles            ▪×2 + 2f + ⟦sequence⟧
+```
+
+Legend:
+
+- **▪×N** — categorical head over N labels (hand=2, face=6, action enums vary).
+- **▫** — boolean head.
+- **Nf** — continuous N-vector.
+- **ΔNf** — continuous delta against an observation channel ("pointer in vec
+  form" — the structured-action argument is the delta, never the absolute
+  coord; same physical motion → same representation across different starts).
+- **☆** — pointer head: attention over observation tokens (entity set / local
+  block grid). Currently absolute on the wire (raw `entity_id`, integer
+  `block_pos`); swaps to a learned pointer when the corresponding observation
+  channels land. Documented per-codec as the *pointer gap*.
+- **opt** — fires only on certain action-enum values; presence enforced by the
+  codec's `__post_init__`.
+- **⟦x⟧** — plumbing: round-trips but is NOT predicted; filled mechanically at
+  packet construction (sequence numbers).
+
+Cross-codec contract: every `Action` exposes
+`semantic_fields: frozenset[str]` — the exact set of heads that fired for
+that instance. The head masks losses against this set; plumbing never enters
+the loss.
+
+Implementation: `craft/codec/<wire-type>.py` per-codec; `craft/codec/server.py`
+is the HTTP shim that exercises encode→decode on live agent traffic
+(homunculus `CodecPassthrough` ships fields + obs across, counts drift).
+
 ## Where to read next
 
 - [`server/README.md`](server/README.md) — get the MC server side running.
