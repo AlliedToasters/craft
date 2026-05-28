@@ -26,11 +26,13 @@ from craft.codec.base import (
     registered_types,
 )
 from craft.codec.move import MoveAction
+from craft.codec.player_action import PlayerActionAction
 from craft.codec.use_item_on import UseItemOnAction
 
 __all__ = [
     "Action",
     "MoveAction",
+    "PlayerActionAction",
     "UseItemOnAction",
     "decode",
     "encode",
