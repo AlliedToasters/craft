@@ -661,15 +661,23 @@ cuts size with *negative* compute cost — one `getKey().toString()` per
 distinct block instead of per cell — whereas gzip trades scarce CPU for
 abundant disk.
 
-**Measured factor: ~2×, not more.** A real row: 3332 non-air cells, ~58 KB
-(~17.6 B/cell) vs ~32 B/cell inline. The id string was only ~half the
-per-cell bytes; the three coordinate ints + JSON punctuation are the rest and
-the palette can't touch them. Further size wins, if needed, come from the
-coordinates, not the ids: stream-gzip (the dx/dy/dz sequences and repeated
-indices compress heavily — likely 5–10× — at the CPU cost above) or a dense
-row-major positional array (drops per-cell offsets entirely; wins when the
-cube is dense, loses when it's mostly air). Defer both until a frozen-set dry
-run shows total footprint is actually a problem.
+**Palette factor: ~2×.** A real row: 3332 non-air cells, ~58 KB (~17.6 B/cell)
+vs ~32 B/cell inline. The id string was only ~half the per-cell bytes; the
+three coordinate ints + JSON punctuation are the rest and the palette can't
+touch them.
+
+**On top of palette: stream-gzip, opt-in at arm time.** The Phase-4 dry run
+showed the real footprint (~64 KB/sidecar-row → ~383 MB per 5-min rollout
+uncompressed → ~11 GB for a 30-rollout set), which crossed the "is it a
+problem" line. The CPU objection that picked palette over gzip applies to
+*fleet* rollouts (C~20); frozen capture runs only 1–3 agents, so gzip's
+~3–5%/core is affordable there. The sidecar writer takes a `gzip` arm flag
+(default off, so the channel stays cheap if armed mid-fleet); the
+frozen-capture runner turns it on. **Measured 4.7×** (13.6 KB/row → ~82 MB
+per 5-min rollout, ~2.4 GB for a 30-rollout set), `.gz` rows gunzip-inspectable.
+A dense row-major positional array remains an unused lever (drops per-cell
+offsets; wins when the cube is dense, loses when mostly air) — not needed at
+the post-gzip footprint.
 
 `face_mask` is **not** captured — it's a function of the block cube's
 neighbors, recomputed at projection. Entity records carry **no

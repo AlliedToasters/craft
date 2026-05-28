@@ -32,6 +32,7 @@ before invoking (the daily-driver config).
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -45,6 +46,13 @@ import requests
 
 def _base(port: int) -> str:
     return f"http://127.0.0.1:{port}"
+
+
+def _open_text(path: Path):
+    """Text handle, transparently gunzipping ``.gz`` (the sidecar is gzipped)."""
+    if str(path).endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return open(path, encoding="utf-8")
 
 
 def _git_head(repo: Path) -> str | None:
@@ -68,8 +76,11 @@ def _sha256(path: Path) -> str | None:
     return h.hexdigest()
 
 
-def _arm(base: str, route: str, path: Path) -> dict:
-    r = requests.post(f"{base}{route}/arm", json={"path": str(path)}, timeout=10)
+def _arm(base: str, route: str, path: Path, gzip_flag: bool = False) -> dict:
+    body: dict = {"path": str(path)}
+    if gzip_flag:
+        body["gzip"] = True
+    r = requests.post(f"{base}{route}/arm", json=body, timeout=10)
     r.raise_for_status()
     return r.json()
 
@@ -114,7 +125,7 @@ def _verify_join(packets_path: Path, sidecar_path: Path) -> dict:
     """Every packet's obs.tick should have a matching sidecar row (§8e join)."""
     pk_ticks: set[int] = set()
     if packets_path.exists():
-        with open(packets_path, encoding="utf-8") as f:
+        with _open_text(packets_path) as f:
             for line in f:
                 try:
                     pk_ticks.add(json.loads(line)["obs"]["tick"])
@@ -122,7 +133,7 @@ def _verify_join(packets_path: Path, sidecar_path: Path) -> dict:
                     continue
     sc_ticks: set[int] = set()
     if sidecar_path.exists():
-        with open(sidecar_path, encoding="utf-8") as f:
+        with _open_text(sidecar_path) as f:
             for line in f:
                 try:
                     sc_ticks.add(json.loads(line)["tick"])
@@ -143,13 +154,13 @@ def _verify_join(packets_path: Path, sidecar_path: Path) -> dict:
 def _file_stats(path: Path, line_key: str = "lines") -> dict:
     lines = 0
     if path.exists():
-        with open(path, "rb") as f:
+        with _open_text(path) as f:  # gz-aware: counts decompressed rows
             lines = sum(1 for _ in f)
     return {
         "path": str(path),
         line_key: lines,
-        "bytes": path.stat().st_size if path.exists() else 0,
-        "sha256": _sha256(path),
+        "bytes": path.stat().st_size if path.exists() else 0,  # on-disk (compressed)
+        "sha256": _sha256(path),  # over stored bytes — integrity of the artifact as written
     }
 
 
@@ -203,14 +214,19 @@ def run_capture(args: argparse.Namespace) -> dict:
         rdir = out / f"rollout-{i}"
         rdir.mkdir(parents=True, exist_ok=True)
         packets_path = rdir / "packets.jsonl"
-        sidecar_path = rdir / "sidecar.jsonl"
+        sidecar_path = rdir / "sidecar.jsonl.gz"  # gzipped (§8e footprint)
         agent_path = rdir / "agent.jsonl"
 
         print(f"\n=== rollout {i+1}/{args.rollouts} → {rdir} ===", flush=True)
         # Arm sidecar FIRST (and disarm it LAST, below) so its per-tick coverage
         # is a strict superset of the packet stream — no arm-gap boundary tick
         # where a packet is recorded before the sidecar starts → 100% join.
-        _arm(base, "/obs/sidecar", sidecar_path)
+        _arm(base, "/obs/sidecar", sidecar_path, gzip_flag=True)
+        # Let the sidecar run a few ticks before packets start. A packet emitted
+        # in the same game-tick the recorders arm references the pose snapshot
+        # from the *previous* tick — one older than the sidecar's first row — so
+        # without this gap it would be the lone unjoinable packet per rollout.
+        time.sleep(0.25)
         _arm(base, "/packets/recording", packets_path)
 
         cmd = [
