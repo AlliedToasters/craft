@@ -250,6 +250,22 @@ def _sample_actions() -> list[codec.Action]:
     samples.append(codec.encode("minecraft:interact", _ATTACK_FIELDS, _OBS))
     samples.append(codec.encode("minecraft:interact", _INTERACT_FIELDS, _OBS))
     samples.append(codec.encode("minecraft:interact", _INTERACT_AT_FIELDS, _OBS))
+    samples.append(codec.encode("minecraft:swing", {"hand": "MAIN_HAND"}, _OBS))
+    samples.append(codec.encode(
+        "minecraft:player_input",
+        {k: False for k in ("forward","backward","left","right","jump","shift","sprint")},
+        _OBS,
+    ))
+    samples.append(codec.encode(
+        "minecraft:player_command",
+        {"entity_id": 1, "action": "START_SPRINTING", "data": 0},
+        _OBS,
+    ))
+    samples.append(codec.encode(
+        "minecraft:use_item",
+        {"hand": "MAIN_HAND", "sequence": 1, "yaw": 0.0, "pitch": 0.0},
+        _OBS,
+    ))
     return samples
 
 

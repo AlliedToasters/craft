@@ -28,6 +28,10 @@ from craft.codec.base import (
 from craft.codec.interact import InteractAction
 from craft.codec.move import MoveAction
 from craft.codec.player_action import PlayerActionAction
+from craft.codec.player_command import PlayerCommandAction
+from craft.codec.player_input import PlayerInputAction
+from craft.codec.swing import SwingAction
+from craft.codec.use_item import UseItemAction
 from craft.codec.use_item_on import UseItemOnAction
 
 __all__ = [
@@ -35,6 +39,10 @@ __all__ = [
     "InteractAction",
     "MoveAction",
     "PlayerActionAction",
+    "PlayerCommandAction",
+    "PlayerInputAction",
+    "SwingAction",
+    "UseItemAction",
     "UseItemOnAction",
     "decode",
     "encode",
