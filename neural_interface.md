@@ -792,3 +792,66 @@ meta-observables **under evaluation**, not committed codec-facing channels
   (`server.py`).
 - [`tests/test_codec_server.py`](tests/test_codec_server.py),
   per-codec round-trip tests — the executable form of §1's invariants.
+
+## 10. Sprint state + where to pick up (2026-05-28)
+
+The obs-ablation went from spec to a validated end-to-end pipeline with first
+results across R0/R1/R3. This section is the handoff.
+
+### 10a. What shipped
+
+- **Capture infra** (homunculus): per-packet recording carries the obs
+  superset (R0 pose + R2 stats/inventory + §8f meta); `/obs/meta` (agent-pushed
+  `g_t`/`current_tool`/`waiting_on_llm`); `/obs/sidecar` heavy per-tick channel
+  (palette block grid r=10, entity_set r=48, `baritone_state`), opt-in gzip.
+- **Frozen-capture runner** (`experiments/next_packet/capture.py`): N rollouts,
+  both streams armed (sidecar first / disarm last → 100% tick-join), manifest
+  with commits + per-file sha256 + content hash + spawn biome.
+- **Ablations**: `ablation_r0_r1.py` (goal vs temporal, disentangled),
+  `ablation_r1_r3.py` (entity_set on interact). Discriminator only.
+- **Findings** (§8c-bis): lever ranking **temporal ≫ entity > goal** for packet
+  *type*; `g_t` falsified as a discriminator signal; entity_set confirmed for
+  interact but modest (KillAura co-emits swing+interact).
+- **Data on disk** (gitignored, kept for re-runs): `results/frozen_dryrun`
+  (mining, 5102 pkts), `results/frozen_combat` (midnight survive, 8757 pkts).
+
+### 10b. Pick up here (priority order)
+
+1. **Parameter heads** — the model is discriminator-only, so §8c's *literal*
+   claims are untested (they are all head-level). Build type-conditioned heads
+   with `semantic_fields`-masked loss (§4). This is the gate for everything
+   below. **Wiring note:** the ablations use `line["id"]` as the label and skip
+   the codec entirely; heads need real labels — wire `craft.codec.encode(id,
+   fields, obs)` into the dataset to get the `Action` and its `semantic_fields`.
+   Start with two heads: `interact.action` (enum) and `use_item_on.block_pos`.
+2. **block_pos pointer head over `block_grid`** — the **marquee unverified §8c
+   prediction**: `use_item_on.block_pos` near-flat R0–R2 then a big jump at R3
+   when it becomes a pointer into `block_grid`. The sidecar already captures the
+   grid; `ablation_r1_r3.py` only wired `entity_set` — add a block-grid
+   projection + a masked-softmax pointer head (§6b). This is the cleanest test
+   of the pointer-gap thesis.
+3. **Scale the frozen set** — pipeline is validated on 2–4 rollout dry runs.
+   Capture a real N≥30 disjoint-seed set spanning regimes (dawn survival +
+   midnight combat + mining), freeze it, hash it, keep it train-disjoint (§8e).
+4. **Phase 3 — vision (R4)** — the last capture channel: Xvfb frame grab at tick
+   cadence → file-path ref in the sidecar row (headless observability pipeline
+   already exists).
+5. **Give `g_t` a fair test** — Qwen's `g_t` collapses to the tool name (§8a
+   caveat), so the goal channel was never richly exercised. Needs a model that
+   narrates intent in tool-call `content`, or a distinct goal signal.
+
+### 10c. Load-bearing gotchas for whoever picks up
+
+- **Deploy = kill→cp→relaunch.** Never `cp` the homunculus jar over a running
+  instance (corrupts lazy class loading). Kill agent N (`pkill -f
+  "[h]omunculus.port=2557N"`), cp, relaunch via `./launch_agent.sh N`.
+- **`TICK_COUNTER` is cumulative** over the client's life, not per-rollout — so
+  sidecar/packet ticks keep climbing across rollouts on the same client.
+- **Capture arm order**: sidecar first + 0.25 s sleep + packets, disarm packets
+  first; otherwise the first packet of a rollout has no sidecar row.
+- **Sidecar is gzipped + palette-encoded**; read with gzip + resolve
+  `block_palette[idx]`. Entity records are raw (no threat field) — keep it that
+  way (ml.MD §5b).
+- **Disentangle obs groups** in every ablation (§8c-bis) — bundled rungs let
+  temporal masquerade as goal.
+- **Run with `.venv/bin/python`** (project venv; has `dotenv`, torch cu128).

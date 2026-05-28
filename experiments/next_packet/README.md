@@ -20,14 +20,41 @@ baseline. It answers:
   on `use_item_on` and `interact.entity_id` is pre-registered as the
   pointer-gap closure test.
 
+> **Status (2026-05-28): discriminator ablation done across R0/R1/R3.**
+> Lever ranking for packet *type*: **temporal ≫ entity > goal**. `g_t`
+> falsified as a discriminator signal; `entity_set` confirmed-but-modest for
+> `interact`. See `neural_interface.md` §8c-bis (results) and §10 (handoff +
+> where to pick up — **parameter heads are next**).
+
 ## Files
 
 | File | What it does |
 |---|---|
-| `dataset.py` | JSONL reader → `(obs_dict, Action)` pairs. Pure Python, no ML deps. |
-| `features.py` | `obs_dict` → flat float vector + `packet_type_label`. Pure Python. |
-| `metrics.py` | Per-type accuracy tracker + pre-registered `(type × rung)` comparison table. |
-| `train.py` | MLP trunk + 11 discriminator/parameter heads. Requires `torch`. |
+| `capture.py` | **Frozen-capture runner** (§8e). N rollouts, arms packet + sidecar streams, verifies tick-join, writes manifest (commits + sha256 + content hash). |
+| `ablation_r0_r1.py` | R0→R1 discriminator ablation; 4 arms disentangle **goal vs temporal**. |
+| `ablation_r1_r3.py` | R1→R3 ablation adding `entity_set` (tick-joined from the sidecar); focus on `interact`. |
+| `dataset.py` | JSONL reader → `(obs_dict, Action)` pairs (used by `train.py`; the ablations read packet JSONL directly). |
+| `features.py` | `obs_dict` → flat vector + `PACKET_TYPES`/`packet_type_label`. |
+| `metrics.py` | Per-type accuracy tracker + pre-registered `(type × rung)` table. |
+| `train.py` | Original MLP scaffold (fixed-width). The ablation scripts supersede it for rung work; **parameter heads go here or a successor**. |
+
+## Reproduce the sprint results
+
+```bash
+# captured data is on disk (gitignored): results/frozen_dryrun (mining),
+# results/frozen_combat (midnight survive). Re-run the ablations on it:
+.venv/bin/python -m experiments.next_packet.ablation_r0_r1 \
+    --recordings "results/frozen_combat/rollout-*/packets.jsonl" --epochs 50
+.venv/bin/python -m experiments.next_packet.ablation_r1_r3 \
+    --rollouts-glob "results/frozen_combat/rollout-*" --epochs 50
+
+# capture fresh data (homunculus client on :2557N must be up — see CLAUDE.md):
+export QWEN="hf.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF:F16"
+export CRAFT_SCOUT_FANOUT_MODEL="$QWEN" CRAFT_SCOUT_UNIFY_MODEL="$QWEN" CRAFT_LOOK_AROUND_MAX_RADIUS=1
+.venv/bin/python -m experiments.next_packet.capture \
+    --rollouts 4 --turns 10 --goal survive --start-phase midnight \
+    --model "$QWEN" --port 25570 --player agent0 --out results/frozen_combat
+```
 
 ## Quick start
 
