@@ -49,6 +49,7 @@ from .features import (
     FEATURE_NAMES,
     NUM_PACKET_TYPES,
     PACKET_TYPES,
+    FeatureNormalizer,
     FeatureVec,
     obs_to_features,
     packet_type_label,
@@ -61,28 +62,37 @@ def _build_dataset(
     *,
     val_frac: float = 0.1,
     seed: int = 42,
-) -> tuple[list[tuple[FeatureVec, int, str]], list[tuple[FeatureVec, int, str]], LoadStats]:
-    """Load recordings → (features, disc_label, packet_type) triples, split train/val."""
+) -> tuple[list[tuple[FeatureVec, int, str]], list[tuple[FeatureVec, int, str]], LoadStats, FeatureNormalizer]:
+    """Load recordings → (features, disc_label, packet_type) triples, split train/val.
+
+    Returns a fitted FeatureNormalizer alongside the splits. Features are
+    z-scored using stats from the training split only (no val leakage).
+    """
     stats = LoadStats()
-    examples: list[tuple[FeatureVec, int, str]] = []
+    raw: list[tuple[dict, int, str]] = []
     for obs, action in load_recordings(recordings, stats=stats):
-        fv = obs_to_features(obs)
         label = packet_type_label(action.packet_type)
-        examples.append((fv, label, action.packet_type))
+        raw.append((obs, label, action.packet_type))
 
     rng = random.Random(seed)
-    rng.shuffle(examples)
-    n_val = max(1, int(len(examples) * val_frac))
-    val = examples[:n_val]
-    train = examples[n_val:]
-    return train, val, stats
+    rng.shuffle(raw)
+    n_val = max(1, int(len(raw) * val_frac))
+    raw_val = raw[:n_val]
+    raw_train = raw[n_val:]
+
+    norm = FeatureNormalizer()
+    norm.fit([obs for obs, _, _ in raw_train])
+
+    train = [(norm.transform(obs), label, pt) for obs, label, pt in raw_train]
+    val = [(norm.transform(obs), label, pt) for obs, label, pt in raw_val]
+    return train, val, stats, norm
 
 
 def run_dry(recordings: list[str]) -> None:
     """Exercise the full data pipeline without torch. Prints load stats +
     dataset distribution and exits 0."""
     print("=== dry run — no training ===")
-    train, val, stats = _build_dataset(recordings)
+    train, val, stats, norm = _build_dataset(recordings)
     print(stats.summary())
     print()
 
@@ -93,9 +103,11 @@ def run_dry(recordings: list[str]) -> None:
     print()
 
     # Show feature vector for first example
+    print("\nNormalizer (fit on train split):")
+    print(norm.summary())
     if train:
         fv, _label, pt = train[0]
-        print(f"Feature vector ({len(fv)} dims) for first example ({pt!r}):")
+        print(f"\nNormalized feature vector ({len(fv)} dims) for first example ({pt!r}):")
         for name, val_f in zip(fv.names, fv.values):
             print(f"  {name:<32}  {val_f:+.6f}")
     print("dry run OK")
@@ -144,13 +156,16 @@ def train_loop(
             h = self.trunk(x)
             return self.discriminator(h)
 
-    model = NextPacketModel(input_dim, hidden, NUM_PACKET_TYPES)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device: {device}")
+
+    model = NextPacketModel(input_dim, hidden, NUM_PACKET_TYPES).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
     def to_tensor(batch: list[tuple[FeatureVec, int, str]]) -> tuple[Any, Any]:
-        xs = torch.tensor([ex[0].values for ex in batch], dtype=torch.float32)
-        ys = torch.tensor([ex[1] for ex in batch], dtype=torch.long)
+        xs = torch.tensor([ex[0].values for ex in batch], dtype=torch.float32).to(device)
+        ys = torch.tensor([ex[1] for ex in batch], dtype=torch.long).to(device)
         return xs, ys
 
     rng = random.Random(0)
@@ -215,8 +230,10 @@ def main() -> None:
         return
 
     print(f"Loading recordings: {recordings}")
-    train, val, stats = _build_dataset(recordings, val_frac=args.val_frac, seed=args.seed)
+    train, val, stats, norm = _build_dataset(recordings, val_frac=args.val_frac, seed=args.seed)
     print(stats.summary())
+    print("\nNormalizer (fit on train split):")
+    print(norm.summary())
     print(f"train={len(train)}  val={len(val)}")
     if not train:
         print("No training examples found. Use --dry-run to debug.", file=sys.stderr)

@@ -75,6 +75,66 @@ class FeatureVec(NamedTuple):
         return len(self.values)
 
 
+class FeatureNormalizer:
+    """Fit mean/std on training examples; apply z-score normalization.
+
+    World coordinates (x, y, z) span ±100k+ depending on spawn range —
+    orders of magnitude larger than the sin/cos/boolean features. Without
+    normalization the first few gradient steps saturate the trunk on the
+    spatial features and the discriminator never recovers.
+
+    Usage::
+
+        norm = FeatureNormalizer()
+        norm.fit(train_obs_list)           # list[dict] from dataset.py
+        fv = norm.transform(obs)           # returns FeatureVec with z-scored values
+        # or in one shot for a single example:
+        fv = norm.transform(obs)
+    """
+
+    def __init__(self) -> None:
+        self.mean: list[float] = [0.0] * len(FEATURE_NAMES)
+        self.std: list[float] = [1.0] * len(FEATURE_NAMES)
+        self._fitted = False
+
+    def fit(self, obs_list: list[dict]) -> "FeatureNormalizer":
+        import math as _math
+
+        n = len(obs_list)
+        if n == 0:
+            return self
+        # Accumulate sum and sum-of-squares per feature.
+        sums = [0.0] * len(FEATURE_NAMES)
+        sq_sums = [0.0] * len(FEATURE_NAMES)
+        for obs in obs_list:
+            fv = obs_to_features(obs)
+            for i, v in enumerate(fv.values):
+                sums[i] += v
+                sq_sums[i] += v * v
+        for i in range(len(FEATURE_NAMES)):
+            mean = sums[i] / n
+            var = sq_sums[i] / n - mean * mean
+            self.mean[i] = mean
+            # Clamp std to ≥1e-6 so boolean/constant features don't blow up.
+            self.std[i] = max(_math.sqrt(max(var, 0.0)), 1e-6)
+        self._fitted = True
+        return self
+
+    def transform(self, obs: Mapping[str, Any]) -> FeatureVec:
+        fv = obs_to_features(obs)
+        normed = [
+            (v - self.mean[i]) / self.std[i]
+            for i, v in enumerate(fv.values)
+        ]
+        return FeatureVec(values=normed, names=fv.names)
+
+    def summary(self) -> str:
+        lines = [f"  {'Feature':<32}  {'Mean':>12}  {'Std':>12}"]
+        for name, m, s in zip(FEATURE_NAMES, self.mean, self.std):
+            lines.append(f"  {name:<32}  {m:>12.4f}  {s:>12.4f}")
+        return "\n".join(lines)
+
+
 def obs_to_features(obs: Mapping[str, Any]) -> FeatureVec:
     """Convert an obs dict to a flat float feature vector.
 
