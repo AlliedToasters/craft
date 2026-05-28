@@ -44,6 +44,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .checkpoint import save_checkpoint
 from .dataset import LoadStats, load_recordings
 from .features import (
     FEATURE_NAMES,
@@ -122,6 +123,8 @@ def train_loop(
     lr: float,
     batch_size: int,
     rung: str,
+    checkpoint_path: str | None = None,
+    normalizer: "FeatureNormalizer | None" = None,
 ) -> None:
     try:
         import torch
@@ -168,6 +171,7 @@ def train_loop(
         ys = torch.tensor([ex[1] for ex in batch], dtype=torch.long).to(device)
         return xs, ys
 
+    best_val_acc = 0.0
     rng = random.Random(0)
     for epoch in range(1, epochs + 1):
         model.train()
@@ -198,8 +202,18 @@ def train_loop(
                     m.update(true_type, PACKET_TYPES[pred_idx])
 
         avg_loss = total_loss / max(n_batches, 1)
-        print(f"\nEpoch {epoch}/{epochs}  train_loss={avg_loss:.4f}")
+        val_acc = m.overall_accuracy()
+        print(f"\nEpoch {epoch}/{epochs}  train_loss={avg_loss:.4f}  val_acc={val_acc:.3f}")
         print(m.report(rung=rung))
+
+        if checkpoint_path and normalizer and val_acc > best_val_acc:
+            best_val_acc = val_acc
+            save_checkpoint(
+                model, normalizer, checkpoint_path,
+                rung=rung, epoch=epoch, val_acc=val_acc,
+                train_loss=avg_loss, n_train=len(train), n_val=len(val),
+            )
+            print(f"  ✓ checkpoint saved (val_acc={val_acc:.3f}) → {checkpoint_path}")
 
 
 def main() -> None:
@@ -220,6 +234,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rung", type=str, default="R0",
                         help="Obs rung label for metrics table (e.g. R0, R1)")
+    parser.add_argument("--save-checkpoint", type=str, default=None,
+                        metavar="PATH",
+                        help="Save best-val-acc checkpoint to this path (e.g. checkpoints/r0.pt)")
     args = parser.parse_args()
 
     # Expand ~ in paths
@@ -246,6 +263,8 @@ def main() -> None:
         lr=args.lr,
         batch_size=args.batch_size,
         rung=args.rung,
+        checkpoint_path=args.save_checkpoint,
+        normalizer=norm,
     )
 
 
