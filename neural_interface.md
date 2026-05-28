@@ -249,6 +249,38 @@ The first two are within-codec; the third is across-codec (the discriminator
 is itself the conditioning). The loss spec (§4) only needs the
 `semantic_fields` set — the carrying detail is substrate.
 
+### 3d. Temporal frame
+
+§3 defines what *one* action looks like. The temporal structure — how
+actions sequence over time — is constrained but underdetermined at this
+layer. Pin the baseline frame so the spec is testable; defer the
+multi-packet-per-tick decision until live control is on the table.
+
+**Frame: flat packet stream.** Each training example is a single captured
+packet plus its tick obs snapshot. Sequence position is carried as a
+`Δticks_since_last: int` feature on the obs (≥0; `0` means same-tick as
+the previous packet). Tick boundaries are recoverable from
+`Δticks_since_last > 0`. This is the form the next-packet-prediction
+baseline (§7-resolution device) consumes.
+
+**Multi-packet-per-tick: deferred, not precluded.** Real client traffic
+emits ≥1 packet per tick (e.g. `swing` + `interact` for an attack); the
+flat-stream frame encodes this as adjacent records with
+`Δticks_since_last = 0`. The frame neither commits to nor rules out a
+tick-grouped representation; the decision belongs to the policy spec when
+live control is in scope.
+
+**No-packet decision: out of scope today.** The 11-way discriminator
+covers wire types only; there is no `NO_PACKET` class for the "this tick
+emitted nothing" case. The next-packet baseline **conditions on packet
+existence** — the dataset is packet-only and the question being answered
+is "given an emit happens, what is it?" When the policy must decide
+*whether* to emit on a given tick — live-control mode — a 12th
+`NO_PACKET` discriminator class is the right shape, and the training
+corpus must include tick-aligned negatives (one example per tick that
+emitted nothing). Flag for §7 / closure when live control is on the
+roadmap.
+
 ## 4. Loss contract
 
 The loss is built per-instance from `Action.semantic_fields`. **Plumbing
@@ -275,10 +307,14 @@ Per-kind loss:
 | Pointer (current — absolute encoding) | Treat as a continuous head: MSE on the integer `block_pos` triple, MSE on the integer `entity_id`. **Stopgap.** The encoding swap to true pointer is a loss-spec change, see §6. |
 | Plumbing | None. Excluded by construction (not in `semantic_fields`). |
 
-Discriminator-conditioned head masking: the policy emits all 11 type-bundles
-in parallel; only the heads for the picked type contribute to the loss for
-this instance. At inference, the head bundle for `argmax(p̂_type)` (or a
-sample from `p̂_type`) is the one that fires.
+Discriminator-conditioned head masking: at **training** time the policy
+emits all 11 type-bundles in parallel; only the heads for the picked type
+contribute to the loss for this instance. Every head gets gradient on
+every batch and the masking decides which contribute to *this instance's*
+loss. At **inference** the 11× parameter-head forward cost is
+unjustified: sample the discriminator first, then run heads for only the
+picked bundle. The architecture is unchanged; the dispatch is lazy.
+Different regime, same model.
 
 `semantic_fields`-conditioned head masking: within a chosen type bundle,
 some heads are gated by action-enum value (the conditional rules in §3b).
@@ -379,7 +415,11 @@ is *runtime-variable* (K or M for this tick) rather than fixed.
    (current) or `"pointer"` (target). Per-call. Default: pick the mode
    the obs supports. This keeps the round-trip invariant during the
    migration: lines captured without the channels still round-trip in
-   absolute mode.
+   absolute mode. **Inference-time invariant**: the mode is fixed per
+   policy — whichever mode the policy was trained against is the only
+   mode its decoder accepts. Mixed-mode training is fine (one model can
+   learn either, given enough of each); mixed-mode inference per-call is
+   a footgun (the pointer head's output shape depends on mode).
 3. **Add `block_idx` / `entity_idx` to the dataclasses as
    `Optional[int]`** alongside the absolute fields. Encoder fills exactly
    one of the two per field; decoder reads the one that's set. The
