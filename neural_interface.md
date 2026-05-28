@@ -650,8 +650,26 @@ encoding radii so they can be swept *downward* without re-recording:
 
 | Sidecar field | Raw capture | Proposed encoding (§2b/§7) |
 |---|---|---|
-| block cube | L∞ radius `R_capture_grid = 10`, air-filtered, each `(block_id, dx, dy, dz)` | `R_grid = 8` |
+| block cube | L∞ radius `R_capture_grid = 10`, air-filtered, **palette-encoded**: a per-row `block_palette` (distinct ids) + `block_grid` of `(palette_idx, dx, dy, dz)` | `R_grid = 8` |
 | entity list | radius `R_capture_ent = 48`, each `(runtime_id, type_id, abs x/y/z, vel x/y/z, yaw, pitch, on_ground, health, raw flags)` | `R_ent = 32` |
+
+The block cube is palette-encoded rather than inlining the id string per cell:
+a per-row `block_palette` of distinct ids + `block_grid` cells of
+`(palette_idx, dx, dy, dz)`. On a CPU-bound host (GPU reserved for the policy
+LLM, MC clients render on CPU) this was chosen over stream-gzip because it
+cuts size with *negative* compute cost — one `getKey().toString()` per
+distinct block instead of per cell — whereas gzip trades scarce CPU for
+abundant disk.
+
+**Measured factor: ~2×, not more.** A real row: 3332 non-air cells, ~58 KB
+(~17.6 B/cell) vs ~32 B/cell inline. The id string was only ~half the
+per-cell bytes; the three coordinate ints + JSON punctuation are the rest and
+the palette can't touch them. Further size wins, if needed, come from the
+coordinates, not the ids: stream-gzip (the dx/dy/dz sequences and repeated
+indices compress heavily — likely 5–10× — at the CPU cost above) or a dense
+row-major positional array (drops per-cell offsets entirely; wins when the
+cube is dense, loses when it's mostly air). Defer both until a frozen-set dry
+run shows total footprint is actually a problem.
 
 `face_mask` is **not** captured — it's a function of the block cube's
 neighbors, recomputed at projection. Entity records carry **no
