@@ -481,7 +481,108 @@ they decide.
   discriminator, the parameter heads, or both. Likely both, but the
   spec for *how* belongs to the policy spec, not this one.
 
-## 8. Where to read next
+## 8. Next-packet-prediction baseline
+
+The first training experiment is the §7-resolution device: predict
+`encode(packet, obs)` from `obs`, report per-type metrics, sweep the
+obs-ablation ladder. This section pins the experiment design decisions
+that affect recorder schema and pre-registered hypotheses. Architecture
+and optimizer choices are outside scope here.
+
+### 8a. Goal context (`g_t`) — recorder schema
+
+**Source: LLM-driven rollouts only.** `g_t` is the goal string the LLM
+emits in its tool call (e.g. `"survive: build shelter before nightfall"`).
+Heuristic-only data has no analogue. Rationale: deployment-coherent
+definition — the policy will see goal strings at inference because the
+LLM will issue them; training on Baritone task-state (a structurally
+different signal the policy won't have at inference) contaminates the
+ablation and produces a model with a train/inference representation skew.
+
+**`g_t` is piecewise-constant over tick windows.** The LLM issues a tool
+call, then 30+ ticks pass before the next. At most ticks `g_t` is "the
+goal issued k ticks ago, still active." Duration is itself predictive —
+packets right after a goal switch look different from packets deep into a
+stable goal.
+
+**Schema consequences for the recorder.** Two fields must be added to the
+`obs` dict when recording LLM-driven rollouts:
+
+| Field | Type | Semantics |
+|---|---|---|
+| `g_t` | `str` | The current goal string, carry-forwarded since the last LLM tool call. |
+| `ticks_since_g_t_issued` | `int` | Ticks elapsed since `g_t` was last updated. `0` on the tick of a goal switch; increments each tick. |
+
+The carry-forward is **explicit in serialization** — every recorded line
+carries the active `g_t` and `ticks_since_g_t_issued`, not just lines
+where `g_t` changed. Implicit forward-fill by the consumer is a footgun
+(incomplete recordings, replay misalignment).
+
+Lines from heuristic-only rollouts carry `g_t: null` and
+`ticks_since_g_t_issued: null`. The obs-ablation's "`+ g_t` rung"
+filters to non-null rows.
+
+### 8b. Obs-ablation ladder
+
+Five rungs. Each rung adds to the previous; the model's architecture is
+held constant (MLP trunk + 11 type-conditioned heads); only the input
+width changes.
+
+| Rung | Obs channels | Infra status |
+|---|---|---|
+| R0 | §2a minimal (8 keys) | ready today |
+| R1 | R0 + `g_t`, `ticks_since_g_t_issued` | ~1 day (schema plumbing into recorder) |
+| R2 | R1 + stats (health, hunger, saturation, air) + inventory (slot → item type) | ~1 day (endpoint data exists) |
+| R3 | R2 + `local_block_grid` + `entity_set` (§2b) | ~1 week (homunculus infra) |
+| R4 | R3 + vision frame (RGB at capture tick) | ~1 week (Xvfb → JSONL integration) |
+
+**Rung gating:** each rung's data collection can start when its infra is
+ready; earlier rungs do not block later ones. Train on whatever rungs
+have data. The baseline (R0 → R1) is the first gate to clear.
+
+### 8c. Pre-registered (type × rung) predictions
+
+The experiment is a 2D grid: `(wire_type, obs_rung)` cells that are
+predicted to move vs stay flat. **Flat predictions matter as much as
+step-change predictions** — an unexpected step where a flat was predicted
+is a finding.
+
+**Predicted step changes:**
+
+| Wire type | Field(s) | Rung | Predicted signal |
+|---|---|---|---|
+| `interact` | discriminator (ATTACK vs INTERACT vs INTERACT_AT) | R0→R1 (+`g_t`) | Intent disambiguates action enum; LLM goal string should be strongly predictive of whether an interact is offensive or activating |
+| `player_command` | discriminator (START/STOP_SPRINTING, PRESS_SHIFT_KEY, …) | R0→R1 (+`g_t`) | Sprint and sneak edges are goal-driven; goal switch → sprint change is a tight coupling |
+| `use_item_on` | `block_pos`, `face`, `cursor` | R2→R3 (+§2b) | Block target is a literal pointer into `local_block_grid`; the pointer-gap closure is the step change. Expect near-zero improvement from R0–R2, then a large jump at R3 |
+| `interact` | `entity_id` | R2→R3 (+§2b) | Same pointer-gap argument for entity targets |
+
+**Predicted flat:**
+
+| Wire type | Rung range | Reasoning |
+|---|---|---|
+| `move_*` | R0→R1 | Movement deltas are dictated by Baritone path-following, not LLM intent. Adding `g_t` should not move per-type accuracy. A measured step here would be a finding: goal context leaking into low-level control more than the architecture expects |
+| `swing` | R0→R3 | Single-field packet; hand choice is nearly deterministic from inventory state. Should be high-accuracy at R0 and flat thereafter |
+
+**Anchors (not hypotheses — calibration reference):**
+
+| Wire type | Remark |
+|---|---|
+| `move_*` | Will dominate dataset by count; aggregate accuracy is mostly this. Report separately, don't let it swamp the per-type table |
+| `player_input` | 7 independent booleans; expected high accuracy at R0 (keyboard state is near-deterministic from movement intent). Useful as a sanity check that the model trains at all |
+
+### 8d. Per-type metrics
+
+Report for every rung × type cell: top-1 accuracy on the discriminator,
+per-head cross-entropy for categoricals/booleans, MSE for continuous
+fields. Aggregate numbers are secondary — the per-type breakdown is the
+primary artifact.
+
+**Dataset balance:** `move_*` will represent >80% of packets. Do not
+resample or re-weight for the baseline — measure the imbalance
+empirically first, then decide whether per-type re-weighting changes the
+results worth caring about. That decision is itself a §7 resolution.
+
+## 9. Where to read next
 
 - [`ml.MD`](ml.MD) — full design rationale, hypotheses, the world-model
   framing this spec serves.
