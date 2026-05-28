@@ -1690,6 +1690,10 @@ def run(
             if evasion_status is not None:
                 rec["evasion"] = {
                     "fired": bool(evasion_status.get("fired")),
+                    # Epoch-ms of the fire edge (None when not fired). Pairs
+                    # with the turn record's `t` + `plan_s`/`exec_s`/`ctx_s`
+                    # to locate the reflex within the turn's phase ribbon.
+                    "fired_at_ms": evasion_status.get("fired_at_ms"),
                     "attackers": evasion_status.get("attackers") or [],
                     "anchor": evasion_status.get("anchor"),
                     "flee_state": evasion_status.get("flee_state"),
@@ -1697,6 +1701,7 @@ def run(
             if water_aversion_status is not None:
                 rec["water_aversion"] = {
                     "fired": bool(water_aversion_status.get("fired")),
+                    "fired_at_ms": water_aversion_status.get("fired_at_ms"),
                     "submerged_pos": water_aversion_status.get("submerged_pos"),
                     "dry_land_pos": water_aversion_status.get("dry_land_pos"),
                     "flee_state": water_aversion_status.get("flee_state"),
