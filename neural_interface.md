@@ -453,11 +453,15 @@ they decide.
 - **`R_grid`** (local block grid radius). Proposed `R_grid = 8` (≈ 4k
   tokens worst case; usually far fewer after air filtering). Tradeoff:
   pointer-target completeness vs token budget. Validate against the
-  reach distances Baritone+Wurst actually use in captured rollouts.
+  reach distances Baritone+Wurst actually use in captured rollouts. The
+  frozen set captures raw at `R_capture_grid = 10` (§8e), so this can be
+  swept in `[0, 10]` without re-recording.
 - **`R_ent`** (entity set radius). Proposed `R_ent = 32`. Should it
   match supersense radius (ml.MD §5a)? Probably yes — the policy reads
   the same set the codec points into. Decide jointly with the supersense
-  spec when that lands.
+  spec when that lands. The frozen set captures raw at
+  `R_capture_ent = 48` (§8e), so this can be swept in `[0, 48]` without
+  re-recording.
 - **Entity feature schema** (`F_ent`). Type id encoding (raw → embed vs
   one-hot vs taxonomy), relative-pos quantization, what to do with
   player-vs-mob asymmetry. **No threat-salience field** (ml.MD §5b).
@@ -540,6 +544,14 @@ width changes.
 ready; earlier rungs do not block later ones. Train on whatever rungs
 have data. The baseline (R0 → R1) is the first gate to clear.
 
+**Capture vs. train are decoupled.** The "Infra status" column above is the
+gate on *training* each rung, not on *capturing* its raw material. Per §8e,
+the frozen validation set captures the raw superset for all five rungs at
+record time (the no-retrofit constraint forces this); a rung becomes
+*trainable* when its projection + model-input code lands, which can lag the
+capture by weeks. The infra estimates here are for the projection/training
+side.
+
 ### 8c. Pre-registered (type × rung) predictions
 
 The experiment is a 2D grid: `(wire_type, obs_rung)` cells that are
@@ -581,6 +593,95 @@ primary artifact.
 resample or re-weight for the baseline — measure the imbalance
 empirically first, then decide whether per-type re-weighting changes the
 results worth caring about. That decision is itself a §7 resolution.
+
+### 8e. Frozen validation set + raw recording superset
+
+The ablation ladder (§8b) is only an ablation if every rung is measured on
+**identical eval packets**. The temptation is to add an obs channel, record
+fresh rollouts, retrain, compare — but that confounds the rung delta with
+spawn variance, mob encounters, and path luck. Instead: **freeze one
+validation set, recorded once with a raw superset, and project it into each
+rung's feature space later.**
+
+**No-retrofit constraint (load-bearing).** The MC world seed is fixed
+(`mc_wipe.sh` replays terrain), but entity positions, mob timing, and the
+agent's exact path are *not* deterministic across replays. So heavy channels
+(`local_block_grid`, `entity_set`, vision) cannot be added to a frozen set
+after the fact — they must be captured at record time **or never exist for
+that set**. Decision: capture **all five rungs (R0–R4) now**, so every
+`(wire_type, obs_rung)` cell in §8c is measured on the same eval packets,
+including the marquee R2→R3 pointer-gap steps.
+
+**Set definition.** N LLM-driven Qwen rollouts. LLM-driven is required —
+`g_t` and the meta-observables (§8f) have no heuristic analogue. Frozen
+artifact carries a **manifest** (spawn seeds, model id, substrate config /
+`CRAFT_*` env, homunculus commit, codec commit) and a **content hash** over
+the recorded files. Stored **disjoint from training rollouts** (no
+spawn-seed overlap) so the eval can't leak into training.
+
+**Schema split by weight.** A 4900-cell block cube on every packet line
+would duplicate across same-tick packets and stall the recorder (it runs on
+the network thread). Split:
+
+| Tier | Cadence | Holds | Join key |
+|---|---|---|---|
+| **Per-packet line** (light) | one per allowlisted packet | R0 pose + R1 `g_t`/`ticks_since` + R2 stats/inventory + meta-observables (§8f) | — |
+| **Tick sidecar** (heavy) | one per tick | R3 raw (block cube + entity list) + R4 raw (vision frame ref) | `tick` |
+
+Same-tick packets share one sidecar row. The per-packet line stays
+network-thread-cheap and ships today; the sidecar is the new heavy capture.
+
+**Capture raw, not encoded.** The sidecar stores raw material; the encoding
+(`R_grid`, `R_ent`, block-id scheme, `F_ent`) is chosen at *projection*
+time, not capture time. Capture radii deliberately **exceed** the proposed
+encoding radii so they can be swept *downward* without re-recording:
+
+| Sidecar field | Raw capture | Proposed encoding (§2b/§7) |
+|---|---|---|
+| block cube | L∞ radius `R_capture_grid = 10`, air-filtered, each `(block_id, dx, dy, dz)` | `R_grid = 8` |
+| entity list | radius `R_capture_ent = 48`, each `(runtime_id, type_id, abs x/y/z, vel x/y/z, yaw, pitch, on_ground, health, raw flags)` | `R_ent = 32` |
+
+`face_mask` is **not** captured — it's a function of the block cube's
+neighbors, recomputed at projection. Entity records carry **no
+threat-salience field** (ml.MD §5b) — only raw kinematics + type.
+
+**Vision (R4).** Frame grabbed off the agent's Xvfb display at tick cadence
+(≤20fps), written as a **file-path reference** in the sidecar row, not
+inlined. Storage is ~an order of magnitude over the block grid — acceptable
+given the no-retrofit constraint and the full-capture decision. Pipeline:
+the existing Xvfb frame grab (headless observability).
+
+### 8f. Meta-observables (control-stack state)
+
+Not world observations — the control stack's *internal* state. Captured
+because (a) they may become first-class world-mod observables, and (b) they
+sharply partition the packet stream for the ablation. Stamped onto the
+per-packet line.
+
+| Field | Type | Source | Semantics |
+|---|---|---|---|
+| `current_tool` | `str \| null` | agent.py | Tool the LLM is executing (`mine_wood`, `travel`, …). Structured sibling of the free-text `g_t`. |
+| `current_tool_args` | `dict \| null` | agent.py | Args of the active tool call. |
+| `waiting_on_llm` | `bool` | agent.py | True while the agent is blocked awaiting the next LLM decision. Packets emitted while true are **substrate-autonomous** (Baritone/Wurst), not brain-directed. |
+| `baritone_state` | `obj \| null` | Baritone via homunculus | Current pathing goal/target + activity (pathing / mining / idle). The execution-layer intent behind most `move_*` packets. |
+
+**Analytical value.** `waiting_on_llm` partitions every packet into
+autonomous vs directed. This is the *mechanism* behind §8c's "`move_*` flat
+across R0→R1" prediction: if move packets are emitted while `waiting_on_llm`
+and explained by `baritone_state`, then `g_t` *shouldn't* help — and we can
+show it directly instead of inferring it from a flat accuracy curve.
+Conversely, a measured `g_t` step on packets emitted *while*
+`waiting_on_llm` would be a finding (intent leaking into autonomous
+control).
+
+**Plumbing.** `current_tool` / `current_tool_args` / `waiting_on_llm` are
+pushed from agent.py via `POST /obs/meta` (the same endpoint that carries
+`g_t`); `PlayerObsSnapshot` stamps each tick's snapshot, carry-forward
+automatic. `baritone_state` needs homunculus to read Baritone's
+`PathingBehavior` — homunculus already drives Baritone, so the handle
+exists; capture is best-effort (null when unavailable). These are
+meta-observables **under evaluation**, not committed codec-facing channels
+(§2c-adjacent) — they are not part of the round-trip contract.
 
 ## 9. Where to read next
 
