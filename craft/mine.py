@@ -8,6 +8,7 @@ target (Baritone's own semantics); the delta wrapper lives in tools.py.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Iterable
 
@@ -411,8 +412,143 @@ def tunnel_for_logs(quantity: int) -> "str | None":
     return tunnel_for(LOG_DROPS, quantity)
 
 
+# Fair-mode stone mining digs a DESCENDING STAIRCASE (down-and-forward, never
+# straight down) to reach stone. Baritone's x-ray path mis-targets dense stone
+# (picks faraway clumps), so stone is forced to blind fair mining; a flat
+# surface tunnel only finds dirt. So instead of a horizontal corridor we cut a
+# 1×2 staircase (one block down per one forward) that passes through the dirt
+# cap into stone, collecting cobble as it goes. This absorbs the recovery into
+# the substrate — an A/B'd failure-message nudge telling the LLM to descend had
+# no measurable effect (2026-05-27). NEVER digs straight down (lava/fall trap):
+# every step is forward+down, a walkable staircase. Bounded by step cap, a
+# min-Y floor, wall-clock, and a stuck-streak (nothing cleared).
+_STONE_STAIR_MAX_STEPS = 24      # 45° staircase: y~70 surface → ~y46, into stone
+_STONE_STAIR_MIN_Y = -40         # don't staircase toward deep lava layers
+_STONE_OVERALL_TIMEOUT = 150.0   # total wall-clock budget for one mine_stone turn
+_STONE_STUCK_LIMIT = 3           # consecutive steps that clear nothing → bail
+
+
+def _step_is_safe(cx: int, cy: int, cz: int) -> "tuple[bool, str]":
+    """Pre-dig probe for one staircase step. Scans the 3×3×3 around the foot
+    cell (cx,cy,cz) and refuses the step if:
+      - lava is in or adjacent to it (digging in would flood / stepping kills), or
+      - the floor below (cx,cy-1) is not solid — i.e. air/void → a fall.
+    Conservative: any scan failure also returns unsafe (don't dig blind). This is
+    what makes the staircase safe where a blind dig-down would drop into lava."""
+    try:
+        data = requests.get(
+            f"{HOMUNCULUS_BASE}/scan_blocks",
+            params={"x1": cx - 1, "y1": cy - 1, "z1": cz - 1,
+                    "x2": cx + 1, "y2": cy + 1, "z2": cz + 1},
+            timeout=5.0,
+        ).json()
+    except (requests.RequestException, ValueError):
+        return False, "scan_failed"
+    blocks = data.get("blocks")
+    if blocks is None:
+        return False, f"scan_{data.get('reason', 'error')}"
+    solid_floor = False
+    for b in blocks:
+        bid = b.get("id", "")
+        if "lava" in bid:
+            return False, f"lava@({b.get('x')},{b.get('y')},{b.get('z')})"
+        # air is omitted by scan_blocks, so a present, non-passable floor cell
+        # is genuine solid ground.
+        if (b.get("x") == cx and b.get("y") == cy - 1 and b.get("z") == cz
+                and not b.get("passable", False)):
+            solid_floor = True
+    if not solid_floor:
+        return False, "no_solid_floor (air/void below)"
+    return True, "ok"
+
+
 def tunnel_for_stone(quantity: int) -> "str | None":
-    return tunnel_for(STONE_DROPS, quantity)
+    """Fair-mode stone via a descending staircase (see note above).
+
+    Gated by CRAFT_STONE_STAIRCASE (default on) so the staircase can be A/B'd.
+    When off, falls back to the legacy flat horizontal tunnel at the agent's
+    current y (no auto-descend) — the control arm.
+    """
+    if os.environ.get("CRAFT_STONE_STAIRCASE", "1").strip().lower() in ("0", "false", "no"):
+        return tunnel_for(STONE_DROPS, quantity)   # legacy flat tunnel (control)
+    drops = STONE_DROPS
+    before = _count_drops(drops)
+    if before is None:
+        print("  [stone] couldn't read inventory; aborting", flush=True)
+        return None
+    target = before + quantity
+    try:
+        pos = requests.get(f"{HOMUNCULUS_BASE}/position", timeout=5.0).json()
+        px, py, pz = int(pos["x"]), int(pos["y"]), int(pos["z"])
+        yaw = float(pos.get("yaw", 0.0))
+    except (requests.RequestException, ValueError, KeyError):
+        print("  [stone] couldn't read position; aborting", flush=True)
+        return None
+
+    direction = _yaw_to_direction(yaw)
+    dx, dz = _DIR_VEC.get(direction, (1, 0))
+    print(
+        f"  [stone] staircase {direction} from ({px},{py},{pz}) "
+        f"target={target} (before={before}, want={quantity})",
+        flush=True,
+    )
+
+    deadline = time.monotonic() + _STONE_OVERALL_TIMEOUT
+    last = before
+    stuck = 0
+    for i in range(1, _STONE_STAIR_MAX_STEPS + 1):
+        remaining_time = deadline - time.monotonic()
+        if remaining_time < 4.0:
+            break
+        # Step i: one block forward + one block down (a walkable stair). Clear the
+        # foot (cy) and head (cy+1) cells of the column; the block below stays as
+        # the next floor. The player's own column is never dug out beneath it.
+        cx, cz = px + dx * i, pz + dz * i
+        cy = py - i
+        if cy <= _STONE_STAIR_MIN_Y:
+            break
+        # Look before you dig: refuse the step if lava is in/around it or the
+        # floor below is air. This is the explicit hazard check that makes the
+        # staircase safe (a bare dig-down has no such guard).
+        safe, why = _step_is_safe(cx, cy, cz)
+        if not safe:
+            print(f"  [stone] step {i} blocked at y={cy}: {why} — stopping staircase",
+                  flush=True)
+            break
+        data = _excavate_box(cx, cy, cz, cx, cy + 1, cz,
+                             timeout_seconds=int(min(remaining_time, 20.0)))
+        # "Cleared anything?" — distinguishes dirt (cleared, no cobble drop) from
+        # baritone being stuck/unreachable (nothing cleared). Lets the staircase
+        # punch through the dry dirt cap without a premature stop.
+        vol = data.get("volume")
+        rem = data.get("remaining")
+        if isinstance(vol, (int, float)) and isinstance(rem, (int, float)):
+            cleared = rem < vol
+        else:
+            cleared = bool(data.get("success"))
+
+        after = _count_drops(drops)
+        if after is None:
+            after = last
+        print(f"  [stone] step {i}: y={cy} cleared={cleared} count={after}/{target}", flush=True)
+        if after >= target:
+            return "tunnel"
+        if cleared:
+            stuck = 0
+        else:
+            stuck += 1
+            if stuck >= _STONE_STUCK_LIMIT:
+                print(f"  [stone] {stuck} steps cleared nothing; baritone stuck — stopping",
+                      flush=True)
+                break
+        last = after
+
+    final = _count_drops(drops)
+    if final is None:
+        final = before
+    if final > before:
+        print(f"  [stone] done; acquired {final - before}", flush=True)
+    return "tunnel" if final > before else None
 
 
 def tunnel_for_iron(quantity: int) -> "str | None":

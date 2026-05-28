@@ -164,6 +164,28 @@ LOADOUTS: dict[str, dict] = {
             ("minecraft:torch",        8),
         ],
     },
+    # Stone-mining capability isolation (+ the descend-nudge A/B). The agent
+    # wakes with a complete wood-tier kit — wooden_pickaxe (REQUIRED to mine
+    # stone), axe, sword, shovel — plus logs, a crafting table, and sticks, so
+    # the only sensible next progression step is to mine stone for a stone
+    # pickaxe. No hunger pressure, no summon: isolates "does the agent mine
+    # stone, and recover when fair-mode mine_stone fails on a stoneless
+    # surface?" Pairs with CRAFT_MINE_STONE_DESCEND_NUDGE for the A/B (see
+    # scripts/mine_stone_nudge_ab.sh). Run with goal=diamond so the tech-tree
+    # motivation (stone → iron → diamond) points straight at stone.
+    "wood_to_stone": {
+        "armor": {},
+        "main": [
+            ("minecraft:wooden_pickaxe", 1),
+            ("minecraft:wooden_axe",     1),
+            ("minecraft:wooden_sword",   1),
+            ("minecraft:wooden_shovel",  1),
+            ("minecraft:oak_log",        8),
+            ("minecraft:crafting_table", 1),
+            ("minecraft:stick",          8),
+            ("minecraft:torch",          8),
+        ],
+    },
 }
 
 
