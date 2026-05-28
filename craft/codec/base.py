@@ -25,6 +25,25 @@ class Action(Protocol):
     ``packet_type`` attribute is the discriminator (the on-wire packet id,
     e.g. ``"minecraft:move_player_pos_rot"``). All other fields are
     pointers/deltas into the observation, type-conditioned.
+
+    **Conventions every Action subclass should follow** (not enforced at the
+    Protocol level so the runtime-checkable ``isinstance`` stays cheap):
+
+      * ``__post_init__`` validates the action's invariants — enum membership,
+        cardinality, wire-shape contracts. Constructing an inconsistent action
+        raises; nothing downstream gets to wrap a broken value.
+
+      * ``semantic_fields: frozenset[str]`` (property) returns the names of
+        the fields whose values the neural head predicts and downstream
+        consumers treat as meaningful. The set may depend on the action's
+        own field values (e.g. ``hand`` participates only when present on the
+        wire). Plumbing fields (sequence numbers, etc) are excluded.
+
+      * ``_is_plumbing: ClassVar[tuple[str, ...]]`` (optional) lists field
+        names that round-trip but are mechanically generated at packet
+        construction (the canonical example is ``sequence`` on the use-item
+        and dig packets). Convention only — codecs can omit if there's no
+        plumbing.
     """
 
     packet_type: str

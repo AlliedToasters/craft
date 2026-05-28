@@ -92,6 +92,14 @@ class UseItemOnAction:
         if len(self.cursor) != 3:
             raise ValueError(f"UseItemOnAction: cursor must be 3 floats, got {self.cursor!r}")
 
+    @property
+    def semantic_fields(self) -> frozenset[str]:
+        """Field names the neural head predicts. All wire fields except the
+        sequence number (plumbing per ``_is_plumbing``)."""
+        return frozenset({
+            "hand", "block_pos", "face", "cursor", "inside", "world_border_hit",
+        })
+
 
 def _encode(packet_type: str, fields: Mapping[str, Any], obs: Mapping[str, Any]) -> Action:
     bp_raw = fields["block_pos"]

@@ -89,6 +89,18 @@ class MoveAction:
                 f"(rot={self.rot!r})"
             )
 
+    @property
+    def semantic_fields(self) -> frozenset[str]:
+        """Field names the neural head predicts. ``pos``/``rot`` participate
+        only when the wire type carries them; ``on_ground`` /
+        ``horizontal_collision`` are always semantic. No plumbing fields."""
+        fields = {"on_ground", "horizontal_collision"}
+        if self.pos is not None:
+            fields.add("pos")
+        if self.rot is not None:
+            fields.add("rot")
+        return frozenset(fields)
+
 
 def _encode(packet_type: str, fields: Mapping[str, Any], obs: Mapping[str, Any]) -> Action:
     has_pos = bool(fields.get("has_pos", False))

@@ -99,6 +99,17 @@ class PlayerActionAction:
         to mask the spatial parameter outputs for non-block actions."""
         return self.action in _SPATIAL_ACTIONS
 
+    @property
+    def semantic_fields(self) -> frozenset[str]:
+        """Field names the neural head predicts. ``action`` is always semantic;
+        ``block_pos`` / ``face`` participate only when ``is_spatial``. Sequence
+        is plumbing and excluded."""
+        fields = {"action"}
+        if self.is_spatial:
+            fields.add("block_pos")
+            fields.add("face")
+        return frozenset(fields)
+
 
 def _encode(packet_type: str, fields: Mapping[str, Any], obs: Mapping[str, Any]) -> Action:
     bp_raw = fields["block_pos"]

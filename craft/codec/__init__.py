@@ -25,12 +25,14 @@ from craft.codec.base import (
     is_registered,
     registered_types,
 )
+from craft.codec.interact import InteractAction
 from craft.codec.move import MoveAction
 from craft.codec.player_action import PlayerActionAction
 from craft.codec.use_item_on import UseItemOnAction
 
 __all__ = [
     "Action",
+    "InteractAction",
     "MoveAction",
     "PlayerActionAction",
     "UseItemOnAction",
