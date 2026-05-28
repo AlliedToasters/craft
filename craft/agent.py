@@ -1368,6 +1368,16 @@ def run(
     plan_s_count = 0
     rollout_start_t = time.time()
 
+    # Clear control-stack meta at rollout start (§8f). Without this, the
+    # carry-forwarded g_t / current_tool from a *prior* rollout (or a manual
+    # /obs/meta probe) bleeds onto the opening packets of this one — a frozen
+    # validation set would then attribute one rollout's tail goal to the next
+    # rollout's spawn. Null g_t also yields null ticks_since (no goal yet).
+    _push_obs_meta({
+        "g_t": None, "current_tool": None,
+        "current_tool_args": None, "waiting_on_llm": False,
+    })
+
     # gemma occasionally returns empty (no content, no tool_call) — typically
     # a reasoning-runaway truncated by the stop-token list (observed
     # probe-validate-r4-dusk T1: 85.7s plan, both content and tool_calls empty).
