@@ -1128,7 +1128,8 @@ def _apply_setup(
     # out of the offhand so it can't be auto-eaten before the agent cooks it; default
     # `any` preserves daily-driver behavior (raw meat still feeds the agent).
     from craft.wurst import (
-        set_autoeat_offhand_mode, set_food_policy, set_killaura_no_pvp, set_wurst_hud,
+        set_autoeat_offhand_mode, set_food_policy, set_killaura_attack_passives_default,
+        set_killaura_no_pvp, set_wurst_hud,
     )
     wurst_report["autoeat_offhand"] = set_autoeat_offhand_mode()
     food_policy = os.environ.get("CRAFT_FOOD_POLICY", "any")
@@ -1136,6 +1137,13 @@ def _apply_setup(
     # Fleet hygiene: stop KillAura from PvP-ing other agents (this build defaults
     # the player filter OFF). Client-side, no server.properties change.
     wurst_report["killaura_no_pvp"] = set_killaura_no_pvp()
+    # Ambient slaughter: KillAura attacks passives by default, so walkby = meat
+    # harvest. Pairs with ShearReflex (homunculus tick handler) — if shears are
+    # in main hand and a sheep is in reach, the reflex fires a shear interact
+    # AND KillAura kills, both on the same encounter. The explicit shear_sheep
+    # tool temporarily flips this back ON (filter=true=protect passives) so
+    # the sheep survives → wool stays renewable.
+    wurst_report["killaura_attack_passives"] = set_killaura_attack_passives_default()
     # Wurst HUD (logo/hacklist/TabGui) is debug-only clutter on recorded
     # rollouts — hide it. CRAFT_WURST_HUD=1 re-enables it for a debug session.
     wurst_hud_on = os.environ.get("CRAFT_WURST_HUD", "0").strip().lower() in ("1", "true", "on", "yes")

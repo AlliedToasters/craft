@@ -197,6 +197,41 @@ def set_killaura_no_pvp(*, verbose: bool = True) -> dict:
     return r
 
 
+def set_killaura_attack_passives_default(*, verbose: bool = True) -> dict:
+    """Set KillAura's ambient default to "attack passives" (Filter passive mobs = false).
+
+    Pairs with ShearReflex (homunculus): when shears are in main hand, the reflex
+    fires a shear interact on any sheep in 3.5m; with KillAura's passive filter OFF,
+    KillAura ALSO attacks. Net effect: walkby-with-shears = wool drop + kill drop +
+    meat — opportunistic harvest with no tool call required. Without shears, walkby
+    is just "kill the sheep for meat", which is also the desired ambient.
+
+    The explicit shear_sheep tool flips the filter back ON for the duration of its
+    call (via _killaura_attack_passives) so the sheep survives — keeps the wool
+    renewable when an agent deliberately commits to milking a sheep.
+
+    Wurst filter semantics are EXCLUSION: True = exclude passives = don't attack.
+    False = include = attack. So this sets "Filter passive mobs" = False.
+
+    Returns the parsed /wurst/setting response; never raises.
+    """
+    r = set_setting_value("KillAura", "Filter passive mobs", False)
+    if verbose:
+        if r.get("success"):
+            extra = "" if r.get("changed") else " (already)"
+            print(
+                f"[killaura] Filter passive mobs=off — ambient slaughter on{extra}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[killaura] FAILED to set Filter passive mobs: "
+                f"{r.get('reason')} {r.get('message', '')[:80]}",
+                flush=True,
+            )
+    return r
+
+
 def set_food_policy(mode: str, *, verbose: bool = True, timeout: float = 5.0) -> dict:
     """POST /food_policy — homunculus endpoint (NOT /wurst/*), kept here so all
     preflight substrate config lives together.

@@ -708,6 +708,37 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "shear_sheep",
+            "description": (
+                "Shear the nearest sheep for wool — NON-LETHAL. Drops 1-3 "
+                "wool of the sheep's color; sheep survives and wool regrows "
+                "after it eats grass, so one sheep is renewable. Composes: "
+                "scan for nearest sheep → /baritone/follow if more than 3 "
+                "blocks away → /shear/sheep → walk over drops to pick up. "
+                "Returns 'sheared <color> sheep: gained Nx <color>_wool' on "
+                "success. Requires shears in inventory (craft 1 shears from "
+                "2 iron_ingot). Three wool + three planks crafts a bed — "
+                "sleeping in one skips night entirely and is invincibility. "
+                "If no sheep nearby, travel() to plains/savanna/mountains."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "radius": {
+                        "type": "integer",
+                        "description": (
+                            "Sheep scan radius in blocks. Default 24, max 64. "
+                            "Larger radius = more travel time."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -789,6 +820,16 @@ def _sleep_raw(max_radius: int = 6) -> dict:
     """
     print(f"  [bed/sleep] requesting sleep (max_radius={max_radius})...", flush=True)
     return _post_homunculus("/bed/sleep", {"max_radius": max_radius}, timeout=10.0)
+
+
+def _shear_sheep_raw() -> dict:
+    """Right-click the nearest shearable sheep (within 3.5 blocks, hardcoded
+    server-side) with shears. Returns standard success/reason/message dict;
+    on success also includes uuid + color + wool_dropped. Caller is responsible
+    for positioning the player within reach first.
+    """
+    print("  [shear/sheep] requesting shear...", flush=True)
+    return _post_homunculus("/shear/sheep", {}, timeout=10.0)
 
 
 # ---- hunt_passive helpers --------------------------------------------------
@@ -3549,6 +3590,237 @@ def handle_hunt_passive(args: dict) -> str:
     return f"hunted {species}: gained {parts}"
 
 
+# ---- shear_sheep helpers + handler ----------------------------------------
+
+_SHEAR_DEFAULT_RADIUS = 24
+_SHEAR_MAX_RADIUS = 64
+# Java side caps reach at 3.5 blocks; we follow once we're farther than this.
+_SHEAR_REACH = 3.0
+_SHEAR_FOLLOW_DURATION_S = 12
+_SHEAR_PICKUP_FOLLOW_DURATION_S = 4
+_SHEAR_FOLLOW_RADIUS = 1   # close enough that vanilla 1.5-block pickup grabs drops next to sheep
+
+
+def _total_wool_count(counts: dict[str, int]) -> int:
+    """Sum across all 16 wool colors. Used for delta-detect on shear success."""
+    return sum(c for k, c in counts.items() if k.endswith("_wool") and c > 0)
+
+
+def handle_shear_sheep(args: dict) -> str:
+    """Find nearest sheep, follow to within reach, shear for wool.
+
+    Tech-tree gate: if no shears in inventory, auto-craft from 2 iron_ingot via
+    the same recursive crafter craft() uses. Without iron, fail with a nudge
+    pointing at mine_iron — same composition shape as cook_meat (auto-place
+    furnace, auto-craft furnace from cobble).
+
+    Sheep-protect mode: ambient KillAura attacks passives by default (so walkby
+    with shears in hand yields kill + shear in one encounter). The explicit
+    shear_sheep tool temporarily flips KillAura's passive filter ON for the
+    duration of the call so the sheep survives — keeps the wool renewable.
+    Restored on every exit path via try/finally; KillAura state is shared infra.
+
+    Flow:
+      1. Pre-flight: shears OR 2 iron_ingot → else tech-tree failure.
+      2. Snapshot wool counts.
+      3. Scan sheep within radius (adults only — Java rejects babies too).
+      4. try: protect sheep (filter passive mobs = true).
+      5. If nearest > _SHEAR_REACH, /baritone/follow.
+      6. /shear/sheep deterministic call. ShearReflex may also have fired
+         during the follow if shears were in hand — wool delta covers both.
+      7. If wool delta == 0, /baritone/goto sheep position for pickup.
+      8. finally: restore default (filter off = attack passives).
+
+    Failure modes:
+      - no_shears_no_iron: agent needs to mine_iron first
+      - shears_craft_failed: had iron but crafter rejected (no recipe / table)
+      - no_sheep_in_range: no adult sheep within `radius`
+      - no_sheep_in_reach: chase didn't close (sheep fled / despawned)
+      - sheep_already_sheared / sheep_is_baby: endpoint-pass-through
+    """
+    radius = args.get("radius") if isinstance(args, dict) else None
+    if not isinstance(radius, int):
+        radius = _SHEAR_DEFAULT_RADIUS
+    radius = max(4, min(_SHEAR_MAX_RADIUS, radius))
+
+    # ---- Tech-tree gate: shears OR auto-craft from iron --------------------
+    inv_before = _inventory_counts()
+    shears_count = inv_before.get("minecraft:shears", 0)
+    if shears_count == 0:
+        iron_count = inv_before.get("minecraft:iron_ingot", 0)
+        if iron_count < 2:
+            return (
+                f"FAILED: no shears and only {iron_count}x iron_ingot "
+                "(need 2 to craft shears). Mine iron first: mine_iron(2), "
+                "then smelt the raw_iron with coal."
+            )
+        print(
+            f"  [shear_sheep] no shears but {iron_count}x iron_ingot — "
+            "auto-crafting shears",
+            flush=True,
+        )
+        craft_result = _craft_recursive("minecraft:shears", 1)
+        if craft_result.startswith("FAILED"):
+            return f"FAILED: shears auto-craft failed: {craft_result[8:]}"
+        # Re-read inventory; shears should now be present.
+        inv_before = _inventory_counts()
+        if inv_before.get("minecraft:shears", 0) == 0:
+            return (
+                "FAILED: shears auto-craft reported success but shears not in "
+                "inventory — homunculus may not have a shears recipe registered"
+            )
+
+    wool_before = _total_wool_count(inv_before)
+
+    # ---- Scan sheep ---------------------------------------------------------
+    sheep_all = _scan_entities_raw("minecraft:sheep", radius=radius, limit=16)
+    sheep_adults = [s for s in sheep_all if not s.get("is_baby", False)]
+    if not sheep_adults:
+        baby_n = len(sheep_all)
+        if baby_n > 0:
+            return (
+                f"FAILED: no adult sheep in range (radius={radius}); "
+                f"{baby_n} baby sheep found but cannot be sheared"
+            )
+        return (
+            f"FAILED: no_sheep_in_range (radius={radius}); "
+            "travel to plains/savanna/mountains to find a herd"
+        )
+
+    nearest = min(
+        sheep_adults, key=lambda e: e.get("distance", _SHEAR_MAX_RADIUS),
+    )
+    dist = nearest.get("distance", _SHEAR_MAX_RADIUS)
+    print(
+        f"  [shear_sheep] nearest sheep dist={dist} (out of "
+        f"{len(sheep_adults)} adults in radius={radius})",
+        flush=True,
+    )
+
+    # ---- Protect-sheep mode + shear + restore -------------------------------
+    # Ambient default: KillAura attacks passives (Filter passive mobs=false).
+    # For shear_sheep we want the sheep to LIVE so wool is renewable, so we flip
+    # the filter on for the duration of this call. on=False (in helper's
+    # semantics) means "don't attack passives" — exactly what we want.
+    protect_res = _killaura_attack_passives(on=False)
+    if not protect_res.get("success"):
+        print(
+            f"  [shear_sheep] WARN: couldn't enable passive filter "
+            f"({protect_res.get('reason')} / "
+            f"{protect_res.get('message','')[:80]}) — sheep may die mid-shear",
+            flush=True,
+        )
+
+    try:
+        # Move into reach. ShearReflex (homunculus tick handler) auto-fires
+        # the shear if shears are in main hand and a sheep is in reach — so by
+        # the time follow returns, the wool may already be in inventory.
+        if dist > _SHEAR_REACH:
+            follow_res = _baritone_follow(
+                ["minecraft:sheep"],
+                duration_seconds=_SHEAR_FOLLOW_DURATION_S,
+                pickup=True,
+                follow_radius=_SHEAR_FOLLOW_RADIUS,
+            )
+            if not follow_res.get("success"):
+                print(
+                    f"  [shear_sheep] follow returned non-success: "
+                    f"{follow_res.get('reason','?')} / "
+                    f"{follow_res.get('message','')[:80]}",
+                    flush=True,
+                )
+
+        # Deterministic shear. ShearReflex may have already fired during the
+        # follow; this call is the belt-and-suspenders that guarantees a shear
+        # attempt this turn even if the reflex's tick didn't catch.
+        shear_res = _shear_sheep_raw()
+        if not shear_res.get("success"):
+            # Check whether the reflex fired during follow — wool may already
+            # be in inventory even though the explicit call failed.
+            wool_after_attempt = _total_wool_count(_inventory_counts())
+            if wool_after_attempt > wool_before:
+                gained_reflex = wool_after_attempt - wool_before
+                # Find the colour delta to report.
+                delta = _wool_delta_by_color(inv_before, _inventory_counts())
+                color_report = ", ".join(
+                    f"{c}x {col}_wool" for col, c in delta.items()
+                ) or f"{gained_reflex}x wool"
+                return (
+                    f"sheared by reflex during follow: gained {color_report} "
+                    "(explicit /shear/sheep returned "
+                    f"{shear_res.get('reason','?')})"
+                )
+            reason = shear_res.get("reason", "unknown")
+            message = shear_res.get("message", "")
+            if reason == "no_sheep_in_reach":
+                return (
+                    "FAILED: no_sheep_in_reach — chase didn't close the gap "
+                    "(sheep fled too fast or was killed mid-chase). Retry, "
+                    "or travel() closer first."
+                )
+            return f"FAILED: {reason} ({message})"
+
+        color = shear_res.get("color", "?")
+
+        # Pickup: if wool didn't reach inventory yet (drop on ground out of
+        # auto-pickup range), goto sheep's last-known position. We do NOT use
+        # /baritone/follow for sweep — see follow's class doc: while any
+        # unsheared sheep is around the predicate matches sheep, not items.
+        wool_after = _total_wool_count(_inventory_counts())
+        if wool_after - wool_before == 0:
+            pos = nearest.get("position") or []
+            if len(pos) == 3:
+                tx, ty, tz = int(pos[0]), int(pos[1]), int(pos[2])
+                print(
+                    f"  [shear_sheep] wool drop on ground at ~({tx},{ty},{tz}); "
+                    "stepping to it for pickup",
+                    flush=True,
+                )
+                _baritone_goto(
+                    tx, ty, tz,
+                    timeout_seconds=_SHEAR_PICKUP_FOLLOW_DURATION_S,
+                    arrival_tolerance=1,
+                )
+                wool_after = _total_wool_count(_inventory_counts())
+
+        gained = max(0, wool_after - wool_before)
+        if gained == 0:
+            return (
+                f"sheared {color} sheep but no wool reached inventory — drop "
+                "may be on the ground out of pickup range. Walk to where the "
+                "sheep was to collect, or retry shear_sheep (won't double-up — "
+                "same sheep returns sheep_already_sheared)."
+            )
+        return f"sheared {color} sheep: gained {gained}x {color}_wool"
+
+    finally:
+        # Restore ambient default (attack passives). KillAura is shared infra;
+        # leaving the filter on would silently disable hunt_passive's reliance
+        # on KillAura killing sheep/cows/pigs.
+        restore_res = _killaura_attack_passives(on=True)
+        if not restore_res.get("success"):
+            print(
+                f"  [shear_sheep] WARN: couldn't restore passive filter "
+                f"({restore_res.get('reason')} / "
+                f"{restore_res.get('message','')[:80]}) — KillAura may stop "
+                f"attacking passives in subsequent tools",
+                flush=True,
+            )
+
+
+def _wool_delta_by_color(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    """Return {color: count_gained} for each wool color that increased."""
+    out: dict[str, int] = {}
+    for k in set(before) | set(after):
+        if not k.endswith("_wool"):
+            continue
+        gain = after.get(k, 0) - before.get(k, 0)
+        if gain > 0:
+            color = k.split(":", 1)[-1].removesuffix("_wool")
+            out[color] = gain
+    return out
+
+
 _COOK_PER_CALL_CAP = 8        # one furnace slot fits 8 items, ~80s real time
 _COOK_NS_PREFIX = "minecraft:"
 
@@ -3844,6 +4116,7 @@ HANDLERS = {
     "look_around": handle_look_around,
     "sleep_in_bed": handle_sleep_in_bed,
     "hunt_passive": handle_hunt_passive,
+    "shear_sheep": handle_shear_sheep,
     "cook_meat": handle_cook_meat,
     "wait": handle_wait,
 }

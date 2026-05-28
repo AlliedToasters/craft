@@ -166,6 +166,9 @@ _BUCKETS: frozenset[str] = frozenset({
 _UTILITY: frozenset[str] = frozenset({
     "minecraft:flint",
     "minecraft:flint_and_steel",
+    "minecraft:shears",  # wool/leaves harvesting — 2 iron_ingot to recraft, so a
+                         # /give that hit AutoDrop wasted a non-trivial cost. Load-bearing
+                         # for the sheep → wool → bed chain (see ShearHandler).
     # compass, map, clock, name_tag, saddle, lead, spyglass OMITTED.
 })
 
