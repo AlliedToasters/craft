@@ -594,6 +594,35 @@ is a finding.
 | `move_*` | Will dominate dataset by count; aggregate accuracy is mostly this. Report separately, don't let it swamp the per-type table |
 | `player_input` | 7 independent booleans; expected high accuracy at R0 (keyboard state is near-deterministic from movement intent). Useful as a sanity check that the model trains at all |
 
+### 8c-bis. First measurement (dry-run, mining regime) + the disentangling rule
+
+The first R0→R1 discriminator run (3-goal Qwen capture, 5102 packets,
+`experiments/next_packet/ablation_r0_r1.py`) surfaced a methodological trap and
+a result.
+
+**Disentangling rule (load-bearing).** R1 as specified (§8b) bundles *two*
+additions: goal identity (`g_t`) **and** the temporal frame (`ticks_since`,
+`delta_tick`). A bundled R0→R1 gain cannot be attributed to either. Always run
+the arms separately — `R1_goal`, `R1_temporal`, `R1_full` — or the temporal
+signal masquerades as a goal signal.
+
+**Result (this regime only).** Overall val top-1: R0 0.465 → R1_goal 0.480
+(**+0.014**) → R1_temporal 0.837 (**+0.371**) → R1_full 0.842. The temporal
+frame drives essentially the entire gain; `g_t` adds ~nothing. Mechanism:
+`move_player_rot` goes 0.000→0.955 under temporal alone — `delta_tick`
+separates per-tick Baritone path rotation from cadenced mining swings. R0
+collapses to the majority class (swing).
+
+**Scope caveat.** This does **not** refute §8c's goal-helps prediction — that
+prediction is about `interact` / `player_command` (offensive vs activating
+intent), which are nearly absent in mining rollouts (interact=0, player_command=2
+in val). The regime where `g_t` should matter is simply not exercised here.
+Testing it needs combat/interaction-varied rollouts. Combined with the §8a
+caveat (Qwen's `g_t` collapses to the tool name), the goal channel is so far
+**unfalsified-because-untested**, not unhelpful. The plumbing — capture →
+join → rung-gated features → goal vocab → per-type metrics — is end-to-end
+validated.
+
 ### 8d. Per-type metrics
 
 Report for every rung × type cell: top-1 accuracy on the discriminator,
