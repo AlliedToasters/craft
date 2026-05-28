@@ -638,6 +638,22 @@ goal-helps-enum prediction is downgraded to unlikely. The plumbing — capture �
 100% tick-join → rung-gated features → goal vocab → per-type metrics — is
 end-to-end validated across two regimes.
 
+**R1→R3 follow-up (the redirect, tested).** The mechanism predicted the
+interact signal lives in `entity_set` (R3), not `g_t`. Tested on the combat
+capture (`ablation_r1_r3.py`): entity features are threat-agnostic — a
+histogram of entity *types* within 8 blocks + nearest distance + count (ml.MD
+§5b, don't bake "hostile" into the sensor; the 26-type vocab is raw). On
+interact: R0 0.000 → R1 0.140 → **R3 0.233 (+0.093 over R1)**. **Confirmed in
+direction** — entity_set helps interact where the goal gave nothing. Two
+nuances: (a) **modest magnitude** — interact co-emits with `swing` (KillAura
+fires both on the same mob-contact), so "mob nearby" predicts the swing+interact
+*cluster*, not interact-vs-swing cleanly; (b) **entity-alone is null**
+(`ent_only` 0.000 on interact) — the entity channel is only usable layered on
+the temporal frame. Overall R3 (0.786) barely beats R1 (0.781): entity helps
+only the rare combat types, not the move/swing bulk the temporal frame already
+owns. So the obs-lever ranking for this substrate's packet *types* is
+**temporal ≫ entity > goal**.
+
 ### 8d. Per-type metrics
 
 Report for every rung × type cell: top-1 accuracy on the discriminator,
