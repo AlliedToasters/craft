@@ -526,6 +526,18 @@ Lines from heuristic-only rollouts carry `g_t: null` and
 `ticks_since_g_t_issued: null`. The obs-ablation's "`+ g_t` rung"
 filters to non-null rows.
 
+**Caveat (model-dependent `g_t` richness).** In practice `g_t` is the LLM's
+free-text turn intent (the tool-call `content`) when present, else the tool
+name. Measured on the first live Qwen-4B rollout: Qwen emits tool calls with
+empty `content`, so `g_t` collapses to the tool name and is near-collinear
+with the `current_tool` meta-observable (§8f). R1 still carries signal — tool
+identity strongly predicts the packet mix (`mine_wood` → swings + look-rot;
+`craft` → almost none) — but for low-`content` models `g_t` and `current_tool`
+are mutually redundant, so an R0→R1 step cannot be attributed to *goal* intent
+over *tool* identity. Disambiguating the two needs a model that narrates
+intent in `content`, or a separate goal channel distinct from the tool. Report
+the `content`-population rate per rollout set so this is visible, not assumed.
+
 ### 8b. Obs-ablation ladder
 
 Five rungs. Each rung adds to the previous; the model's architecture is
