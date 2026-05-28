@@ -1003,6 +1003,20 @@ def _water_aversion_status() -> dict | None:
         return None
 
 
+def _push_obs_meta(payload: dict) -> None:
+    """POST /obs/meta — control-stack meta-observables for the recorder
+    (neural_interface.md §8f). Best-effort: the recorder runs in homunculus
+    and these fields only matter when a recording is armed, so a failed push
+    (server down, not recording) must never perturb the rollout. Only the keys
+    present are updated server-side, so partial pushes (just waiting_on_llm)
+    are fine.
+    """
+    try:
+        requests.post(f"{HOMUNCULUS_BASE}/obs/meta", json=payload, timeout=2.0)
+    except requests.RequestException:
+        pass
+
+
 def _format_water_aversion_preamble(status: dict, tool_name: str) -> str:
     """Render a WATER AVERSION FIRED preamble for the tool result.
 
@@ -1376,6 +1390,10 @@ def run(
             {"role": "user", "content": pending_state},
         ]
         prompt_snapshot = prompt_messages
+        # §8f: mark the brain as blocked on the LLM. Packets emitted during this
+        # window are substrate-autonomous (Baritone/Wurst residual), not
+        # directed by the decision being computed. Carry-forwarded server-side.
+        _push_obs_meta({"waiting_on_llm": True})
         tool_calls, content, reasoning, raw_message = chat_with_tools(prompt_messages, TOOLS, model=model)
         plan_dt = time.perf_counter() - plan_start
         plan_s_total += plan_dt
@@ -1439,6 +1457,23 @@ def run(
         name = tc.function.name
         args = tc.function.arguments
         print(f"=== turn {turn}: executing {name}({args}) ===")
+
+        # §8f: stamp the chosen tool + goal onto the recorder. g_t is the LLM's
+        # free-text intent for the turn (content) when present, else the tool
+        # name; current_tool/current_tool_args carry the structured decision.
+        # waiting_on_llm flips false — packets from here through dispatch are
+        # brain-directed. AgentMeta restamps ticks_since_g_t_issued only when
+        # g_t actually changes, so a repeated goal carries its duration forward.
+        try:
+            parsed_args = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            parsed_args = None
+        _push_obs_meta({
+            "waiting_on_llm": False,
+            "g_t": (content or name),
+            "current_tool": name,
+            "current_tool_args": parsed_args,
+        })
 
         messages.append(
             {
