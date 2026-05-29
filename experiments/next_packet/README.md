@@ -43,6 +43,7 @@ baseline. It answers:
 | `rung_a_driver.py` | **Rung A** type discriminator: command vs executor-state (decomposed). Shows `delta_tick` is a cadence crutch (§11a). |
 | `rung_a_aim.py` | **Rung A** aim head: yaw/pitch regression + re-target subset. Persistence wins per-packet; world-state helps only on combat re-targets. |
 | `rung_a_target.py` | **Rung A** attack-target pointer over `entity_set` — **0.985**, closes the §6 entity pointer gap. |
+| `rung_a_block.py` | **Rung A** block-target pointer over `block_grid` (+ crosshair raycast baseline) — **= crosshair**; the block pointer is gaze, not a separate decision (§12.1). |
 | `dataset.py` | JSONL reader → `(obs_dict, Action)` pairs (used by `train.py`; the ablations read packet JSONL directly). |
 | `features.py` | `obs_dict` → flat vector + `PACKET_TYPES`/`packet_type_label`. |
 | `metrics.py` | Per-type accuracy tracker + pre-registered `(type × rung)` table. |

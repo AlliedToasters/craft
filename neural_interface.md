@@ -918,6 +918,7 @@ near-perfect neural KillAura target-selector.
 | `rung_a_driver.py` | packet-type discriminator (cmd vs exec, decomposed) | cmd ~0; lift is `delta_tick` cadence crutch |
 | `rung_a_aim.py` | yaw/pitch regression (+ re-target subset) | persistence wins; world-state helps only on combat re-targets |
 | `rung_a_target.py` | attack-target pointer over `entity_set` | **0.985** — entity pointer gap closes |
+| `rung_a_block.py` | block-target pointer over `block_grid` (+ crosshair baseline) | **= crosshair (~0.93–1.0)** — block pointer *is* gaze, not a separate decision |
 
 ### 11c. Pick up here (priority order)
 
@@ -974,8 +975,22 @@ segment-softmax pointer. Baselines: "block in the crosshair" (raycast from pose)
 - *Why:* the entity pointer closed at 0.985 (§11a); this is the missing half of
   the §6 pointer gap and the marquee unverified §8c prediction.
 - *Risk:* sparse (~290 destroy events across both frozen regimes).
-- **Done:** a val-acc number + verdict — pointer closes, **or** it's data-starved,
-  which *quantifies* the Track-2 recapture need. Both are results.
+- **Done (2026-05-28):** `rung_a_block.py` shipped. Candidates = *targetable* grid
+  cells (exposed face, within `--reach 6` of the eye); label = `block_pos−origin`
+  cell (100% join in both regimes); per-candidate MLP → segment-softmax. Result on
+  the combined frozen set (172 events, val 43, seed-stable): `nearest` **0.15**,
+  **crosshair raycast 0.93–1.0**, learned `geom` **= crosshair**, `geom+type` adds
+  ~0. **Verdict — the block pointer is NOT a separate decision; it collapses to
+  gaze.** This is the *mirror image* of the entity pointer: there gaze does NOT
+  track the target (KillAura auto-aims server-side, so `nearest`=0.48 and a real
+  head was needed to hit 0.985); here you must *look at* a block to mine it, so the
+  crosshair perfectly determines `block_pos` and the learned head merely re-derives
+  it. **The asymmetry is the finding:** block-target selection lives in the
+  *servo/aim* channel, entity-target selection in the *discrete-decision* channel.
+  Not data-starved — the verdict is conclusive at this n. The real block control
+  signal is therefore *upstream* (what made Baritone aim there = the MineProcess
+  path target), which is exactly what Track 2 exposes → 12.1 hands off cleanly to
+  12.2.
 
 ### 12.2. Targeted recapture — the enabler (homunculus change)
 One capture run that unblocks the rest. Three changes:
