@@ -1057,6 +1057,36 @@ dynamics wash it out.
 - **Done:** the curve + a one-line read ("intent legible ~N ticks → the symbolic
   layer reaches ~X of the rate tower").
 
+**▶ PICK UP HERE (next session — §12.3 is pure offline, no live MC):**
+- *Data:* `results/frozen_narrated/` (gitignored, ~1 GB), 5 rollouts, 100% join.
+  Per rollout: `packets.jsonl` (light per-tick obs) + `sidecar.jsonl.gz` (heavy:
+  `block_grid`, `entity_set`, `baritone_state`). Join packets↔sidecar by
+  `obs.tick == sidecar.tick`. **NB rollout-0/1 also have a `.contaminated` backup**
+  (the pre-salvage file) — ignore it; the live `packets.jsonl` is clean.
+- *Obs fields you need* (in `packets.jsonl` `obs`): `g_t` (free-text intent),
+  `current_tool`, **`ticks_since_g_t_issued`** (← this IS the x-axis, already
+  computed server-side), `x/y/z/yaw/pitch`, `inventory`, `stats`. From the sidecar
+  `baritone_state`: `path_next`/`path_dest` (servo setpoint), `goal`, `mine_active`.
+- *The non-obvious fork — `g_t` target representation.* `g_t` is natural language
+  with **125 distinct clauses over ~125 LLM turns (≈1 example per unique string
+  globally)** → a global 125-way string-classify is degenerate. Don't do that.
+  Options, cleanest first: **(a)** frame as *within-rollout segment recovery* — at
+  each tick the active intent = the clause issued at the last turn; decode WHICH of
+  that rollout's ~25 segments is active from the obs window, accuracy vs
+  `ticks_since_g_t_issued`. **(b)** embed each `g_t` (sentence-transformer or a
+  cheap local embed), decode the embedding from obs and score by
+  cosine/nearest-clause — measures *semantic* legibility, smoother target. **(c)**
+  cluster the 125 clauses into a handful of intent categories (mine-stone /
+  descend-for-iron / craft / travel-relocate …) and classify those. Decide this
+  first; it sets everything downstream.
+- *Template:* mirror `experiments/next_packet/rung_a_target.py` / `rung_a_block.py`
+  (per-event tensors, z-score geom dims, raw one-hot type, small MLP). The x-axis
+  binning (ticks-since-issued) is the new structural piece.
+- *Hypothesis (from rung A):* decode-acc starts high right after a tool call and
+  decays as the fast loop's inertia/cadence washes the command out; the half-life
+  is the moat width. A *flat-high* curve would mean intent stays legible
+  indefinitely (symbolic layer reaches deep) — a finding, not a failure.
+
 ### Deferred (presuppose a trained executor we don't have)
 Closed-loop swap (needs the packet-injection path + a servo); emergent sub-goal
 probe (`embodiment.md` §8 — needs a recurrent executor to probe); continuous-`g_t`
