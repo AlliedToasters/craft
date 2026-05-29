@@ -2,6 +2,8 @@
 
 *Distilled from a brainstorm. Reference doc, not a spec. Captures decisions, rationale, hypotheses, and sequencing.*
 
+> **See also `embodiment.md`** — the fast-loop design layer (control-rate tower, action taxonomy, modes, recurrence=corrigibility boundary, `g_t` as authority interface, multi-goal). The control-theoretic vocabulary built on top of this doc.
+
 ---
 
 ## 0. One-line thesis
