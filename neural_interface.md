@@ -1019,9 +1019,32 @@ One capture run that unblocks the rest. Three changes:
     No recorder/obs-schema change was needed. Pair with Haiku/Sonnet (reliable
     text+tool-call); Qwen risky.
   - *Change 2* is pure capture config (`--goal diamond` + more turns + `--narrate`).
-- **Done (remaining — live run):** deploy the jar, then one capture run →
-  frozen set on disk, manifest written, tick-join verified, `baritone_state.goal`
-  + `path_next` non-null during mining, narrated `g_t` distinct from tool.
+- **Done — live run (2026-05-29):** rebuilt jar deployed (kill→cp→relaunch on
+  agent0, llvmpipe), then a frozen set captured →
+  `results/frozen_narrated` (gitignored): **5 rollouts × 25 turns, Haiku,
+  `--goal diamond --narrate`, peaceful/dawn**, all full 25 turns, zero deaths.
+  **63,874 packets · 51,739 sidecar rows · 100% tick-join (all 5).** All three
+  markers green:
+  - *Change 1 (path target):* `baritone_state` present on every sidecar row;
+    `goal` is now `GoalComposite[...]` during mining (was null);
+    **`path_next` non-null on 25,523 ticks (49%)** = the servo setpoint as
+    absolute `[x,y,z]` (downstream → egocentric Δ). `ticks_to_goal` stays null
+    under `MineProcess` (`estimatedTicksToGoal` empty for composite goals) — not
+    blocking.
+  - *Change 3 (narration):* **125 distinct `g_t` intent clauses · `g_t ≠
+    current_tool` on 97%** of g_t-bearing packets (the 3% equal = turns Haiku left
+    content empty → fell back to tool name). `g_t` and `current_tool` are separate
+    obs fields — intent/tool divergence recorded per packet, ready for 12.3.
+- **Capture-dir reuse bug (found + fixed 2026-05-29):** the first 5-run reused the
+  verify run's `rollout-0/1` dirs and their `packets.jsonl` came back at 49–57%
+  join — `PacketRecorder` armed in `APPEND` while the gzip sidecar truncates, so
+  stale prior-run packets were *prepended* (invisible to a tick-sort: TICK_COUNTER
+  is cumulative, so the stale prefix is monotonic). Salvaged losslessly by dropping
+  the sub-`sidecar_min` tick prefix (dropped counts matched the verify disarms
+  exactly: 14467 + 8172) → all 5 now 100% join; originals kept as
+  `packets.jsonl.contaminated`. **Durable fix:** both `PacketRecorder` and the
+  non-gzip `TickSidecarRecorder` path now arm in `TRUNCATE_EXISTING` — "arm" always
+  means a fresh file. (`manifest.json` `content_hash` predates the salvage — stale.)
 
 ### 12.3. Intent half-life / moat-width — the headline
 On the narrated recapture: train a decoder `g_t ← (obs window)` and plot **decode
