@@ -413,6 +413,22 @@ GOAL_PROMPTS = {
     "bare": BARE_PROMPT,
 }
 
+# Intent-narration override (neural_interface.md §12.2 / §12.3). The base prompts
+# all instruct "leave the content field empty" so g_t collapses to current_tool
+# (§8a) — which makes the §12.3 intent-half-life decode trivial (it just reads the
+# tool name). Appended LAST so it overrides that note: the model writes a one-line
+# WHY into content alongside its single tool call. Since the loop stamps
+# g_t = (content or name) (see ~line 1483), this makes g_t a free-text intent
+# distinct from current_tool. Best paired with a model that reliably emits text +
+# a tool call in one turn (Haiku); Qwen's chat-template may swallow one or the other.
+NARRATE_SUFFIX = (
+    "\n\nINTENT NARRATION (this OVERRIDES the 'leave content empty' note above): "
+    "alongside your single tool call, ALSO write ONE short clause in the content "
+    "field stating WHY — your current intent and what you are working toward right "
+    "now, not the tool name (e.g. 'getting down to Y-12 for iron before dark'). "
+    "Still emit exactly one tool call. Keep the content to one clause."
+)
+
 
 def _fetch_new_deaths(since_ms: int) -> list[dict]:
     """Poll /deaths?since=N for death records the harness hasn't yet surfaced.
@@ -1204,6 +1220,7 @@ def run(
     difficulty: str = "easy",
     jsonl_path: str | None = None,
     model: str = DEFAULT_MODEL,
+    narrate: bool = False,
 ) -> None:
     # Resolve the JSONL artifact path up front so the recorder — started before
     # spawn to capture the full rollout (spectator-drop → terminal) — shares the
@@ -1226,6 +1243,9 @@ def run(
     prompt = GOAL_PROMPTS.get(goal)
     if prompt is None:
         raise ValueError(f"unknown goal {goal!r}; valid: {sorted(GOAL_PROMPTS)}")
+    if narrate:
+        # §12.2 narrated-intent arm: g_t becomes free-text WHY, not the tool name.
+        prompt = prompt + NARRATE_SUFFIX
 
     # Open JSONL sink for post-hoc summarizer. The path was resolved at the top
     # of run() (shared with the recorder); pass jsonl_path='' to disable.
@@ -1842,6 +1862,10 @@ if __name__ == "__main__":
     ap.add_argument("--record-video", action="store_true",
                     help="record the agent's screen (its Xvfb) to <jsonl-stem>.mp4 for the "
                          "full rollout, spawn→terminal (sets CRAFT_RECORD_VIDEO; needs ffmpeg)")
+    ap.add_argument("--narrate", action="store_true",
+                    help="§12.2: ask the model to narrate intent in content alongside the "
+                         "tool call, so g_t becomes free-text intent != current_tool "
+                         "(best with a Haiku/Sonnet model; needed for the §12.3 moat-width decode)")
     args = ap.parse_args()
 
     if args.record_video:
@@ -1856,4 +1880,5 @@ if __name__ == "__main__":
         difficulty=args.difficulty,
         jsonl_path=args.jsonl_out,
         model=args.model,
+        narrate=args.narrate,
     )

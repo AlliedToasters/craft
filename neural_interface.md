@@ -1004,8 +1004,24 @@ One capture run that unblocks the rest. Three changes:
    §8a collapse). *Prerequisite for 12.3.*
 - *Gotchas (§10c):* deploy = kill→cp→relaunch (never over a running jar); arm
   sidecar→sleep 0.25s→packets; `TICK_COUNTER` cumulative; `.venv/bin/python`.
-- **Done:** frozen set on disk, manifest written, tick-join verified,
-  `baritone_state.goal` non-null, narrated `g_t` distinct from tool.
+- **Code landed (2026-05-29):**
+  - *Change 1* — `BaritoneState.snapshot()` enriched (homunculus, compiles clean
+    vs baritone-api-1.13.1). `goal` now reads `pb.getGoal()` (non-null during
+    mining; the old `getCustomGoalProcess().getGoal()` was the null source) and new
+    fields `path_dest` / `path_next` (the immediate waypoint = `positions[idx+1]`,
+    the servo setpoint) / `path_len` / `mine_active` / `ticks_to_goal`. Old
+    `pathing`/`goal_active` kept for back-compat; every read individually guarded.
+    *Effect requires build → deploy (kill→cp→relaunch).*
+  - *Change 3* — `--narrate` flag on `craft.agent` (+ threaded through
+    `capture.py`, recorded in the manifest). Appends `NARRATE_SUFFIX` (overrides
+    "leave content empty"); since the loop already stamps `g_t = (content or name)`
+    (agent.py ~L1483), narrated content *is* `g_t` → distinct from `current_tool`.
+    No recorder/obs-schema change was needed. Pair with Haiku/Sonnet (reliable
+    text+tool-call); Qwen risky.
+  - *Change 2* is pure capture config (`--goal diamond` + more turns + `--narrate`).
+- **Done (remaining — live run):** deploy the jar, then one capture run →
+  frozen set on disk, manifest written, tick-join verified, `baritone_state.goal`
+  + `path_next` non-null during mining, narrated `g_t` distinct from tool.
 
 ### 12.3. Intent half-life / moat-width — the headline
 On the narrated recapture: train a decoder `g_t ← (obs window)` and plot **decode

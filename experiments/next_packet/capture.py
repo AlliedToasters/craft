@@ -198,6 +198,7 @@ def run_capture(args: argparse.Namespace) -> dict:
             "turns": args.turns, "goal": args.goal,
             "spawn_range": args.spawn_range,
             "start_phase": args.start_phase, "difficulty": args.difficulty,
+            "narrate": args.narrate,
         },
         "rollouts": [],
         "notes": [
@@ -239,6 +240,8 @@ def run_capture(args: argparse.Namespace) -> dict:
             "--difficulty", args.difficulty,
             "--jsonl-out", str(agent_path),
         ]
+        if args.narrate:
+            cmd.append("--narrate")  # §12.2: g_t = free-text intent (not tool name)
         t0 = time.time()
         proc = subprocess.run(cmd, cwd=str(craft_root), env=env)
         wall = time.time() - t0
@@ -321,6 +324,9 @@ def main() -> None:
                     choices=["peaceful", "easy", "normal", "hard"])
     ap.add_argument("--out", default="results/frozen_dryrun")
     ap.add_argument("--purpose", default="dry_run")
+    ap.add_argument("--narrate", action="store_true",
+                    help="§12.2: pass --narrate to the agent so g_t is free-text intent "
+                         "(not the tool name); prerequisite for the §12.3 moat-width decode")
     run_capture(ap.parse_args())
 
 
