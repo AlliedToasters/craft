@@ -20,11 +20,18 @@ baseline. It answers:
   on `use_item_on` and `interact.entity_id` is pre-registered as the
   pointer-gap closure test.
 
-> **Status (2026-05-28): discriminator ablation done across R0/R1/R3.**
-> Lever ranking for packet *type*: **temporal ≫ entity > goal**. `g_t`
-> falsified as a discriminator signal; `entity_set` confirmed-but-modest for
-> `interact`. See `neural_interface.md` §8c-bis (results) and §10 (handoff +
-> where to pick up — **parameter heads are next**).
+> **Status (2026-05-28): rung-A reframe — predict the decision, not the packet.**
+> The program is bottom-up replacement of the control hierarchy (§11). Three
+> offline heads on the frozen set: type-discriminator (faked by `delta_tick`
+> cadence), aim-regression (faked by positional inertia), and the **attack-target
+> pointer head — 0.985**, closing the §6 entity pointer gap. The packet stream is
+> ~99% autocorrelation; the control signal is in the sparse discrete events.
+> See `neural_interface.md` §11 (results + where to pick up: block_pos pointer,
+> recapture, closed-loop swap).
+>
+> Prior (superseded as the *objective*, still valid as measurement): discriminator
+> ablation R0/R1/R3 — lever ranking for packet *type* **temporal ≫ entity > goal**,
+> `g_t` falsified (§8c-bis).
 
 ## Files
 
@@ -33,6 +40,9 @@ baseline. It answers:
 | `capture.py` | **Frozen-capture runner** (§8e). N rollouts, arms packet + sidecar streams, verifies tick-join, writes manifest (commits + sha256 + content hash). |
 | `ablation_r0_r1.py` | R0→R1 discriminator ablation; 4 arms disentangle **goal vs temporal**. |
 | `ablation_r1_r3.py` | R1→R3 ablation adding `entity_set` (tick-joined from the sidecar); focus on `interact`. |
+| `rung_a_driver.py` | **Rung A** type discriminator: command vs executor-state (decomposed). Shows `delta_tick` is a cadence crutch (§11a). |
+| `rung_a_aim.py` | **Rung A** aim head: yaw/pitch regression + re-target subset. Persistence wins per-packet; world-state helps only on combat re-targets. |
+| `rung_a_target.py` | **Rung A** attack-target pointer over `entity_set` — **0.985**, closes the §6 entity pointer gap. |
 | `dataset.py` | JSONL reader → `(obs_dict, Action)` pairs (used by `train.py`; the ablations read packet JSONL directly). |
 | `features.py` | `obs_dict` → flat vector + `PACKET_TYPES`/`packet_type_label`. |
 | `metrics.py` | Per-type accuracy tracker + pre-registered `(type × rung)` table. |

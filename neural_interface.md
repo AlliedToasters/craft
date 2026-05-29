@@ -855,3 +855,157 @@ results across R0/R1/R3. This section is the handoff.
 - **Disentangle obs groups** in every ablation (§8c-bis) — bundled rungs let
   temporal masquerade as goal.
 - **Run with `.venv/bin/python`** (project venv; has `dotenv`, torch cu128).
+
+## 11. Bottom-up replacement — the control hierarchy (2026-05-28)
+
+Reframe (supersedes the §8 framing of next-packet prediction as the goal). The
+craft controller is one aggregate heuristic system that *happens to have an LLM in
+the loop*: **meta-driver** (prompt pressure from milestones / hunger / dusk) →
+**LLM driver** (`g_t`, tool call) → **Baritone planner** (path / goal) →
+**Baritone+Wurst executor** (path + mining-goal + mob-proximity → packets) →
+**packets**. The research program is to replace this system with a neural one
+*bottom-up along the control hierarchy* — not by swapping abstract single-tasks
+(evade, mine_stone). Each learned rung is a drop-in at the same interface and
+composes with the heuristic layers still above it.
+
+Rung A = the neural **Baritone+Wurst executor**: given the command from above + the
+executor's own state, emit the body output. Why the bottom first: data
+availability *inverts with height* — the bottom layers are deterministic functions
+we own (queryable for free, DAgger-able), the top (LLM) is stochastic and
+non-queryable. And the sprint's sidecar already records the hierarchy's
+intermediate state (`baritone_state`, `current_tool`, `entity_set`), so rung A is
+already well-posed on the frozen data.
+
+### 11a. The central finding: predict the *decision*, not the *packet*
+
+Three offline heads on the frozen set (`results/frozen_dryrun` mining,
+`results/frozen_combat` combat). The arc is the result:
+
+1. **Type discriminator** (`rung_a_driver.py`): predict packet *type* from
+   command vs executor-state. The **command/`g_t` adds ~nothing** (+0.01–0.02) —
+   the hierarchy cut is real, the executor doesn't need the plan. But the headline
+   0.86 is **faked by `delta_tick`** (the executor's emission *cadence*, a
+   teacher-forcing crutch that vanishes when a net must decide *when* to act).
+   World-state-only (pathing+proximity+pose, no timing) → ~0.52, barely above the
+   pose baseline (0.47/0.52).
+2. **Aim field head** (`rung_a_aim.py`): predict the yaw/pitch of each `*_rot`
+   packet. **Persistence (echo current look) wins outright** — per-packet
+   rotations are ~3–8°, so the stream is positional inertia. World-state makes it
+   *worse* on the full stream. On the rare **re-target events** (|Δyaw|≥15°, ~1.3%
+   of packets), world-state *does* help in combat (pose 81° → +prox 78° → +dt 73°;
+   aim-at-nearest-mob oracle 57° vs persistence 86°) — but the signal is sparse
+   and modest, and "aim at nearest" is a poor model (most rots are path-following).
+3. **Attack-target pointer head** (`rung_a_target.py`): which entity does the
+   executor (KillAura) strike? A per-candidate MLP scoring the `entity_set`,
+   segment-softmax pointer. **0.985** (geom+type; geom-alone 0.954) vs baselines
+   *nearest* 0.48, *nearest-hostile* 0.72. The **§6 entity pointer gap closes
+   decisively**, threat-agnostic (the net learns which types matter).
+
+**Conclusion.** The packet stream is ~99% inertia + cadence autocorrelation, ~1%
+world-driven events. Next-packet prediction (type *or* continuous field) mostly
+measures the stream's self-similarity, not control — type is faked by cadence,
+aim by inertia. The genuinely world-driven, non-fakeable signal lives in the
+**sparse discrete control events** (which block to break, which entity to attack)
+— exactly the §6 pointer gap. **Rung A's correct objective is discrete
+control-event prediction (pointer/enum heads), event-sampled, not the dense
+move/rot/swing stream.** And at that granularity it *works*: a tiny net is a
+near-perfect neural KillAura target-selector.
+
+### 11b. Scripts (offline, on the frozen set)
+
+| Script | Head | Result |
+|---|---|---|
+| `rung_a_driver.py` | packet-type discriminator (cmd vs exec, decomposed) | cmd ~0; lift is `delta_tick` cadence crutch |
+| `rung_a_aim.py` | yaw/pitch regression (+ re-target subset) | persistence wins; world-state helps only on combat re-targets |
+| `rung_a_target.py` | attack-target pointer over `entity_set` | **0.985** — entity pointer gap closes |
+
+### 11c. Pick up here (priority order)
+
+1. **block_pos pointer head** — the other half of §6: which block does
+   `START_DESTROY_BLOCK` / `use_item_on` target, as a pointer into the sidecar
+   `block_grid`. Same shape as `rung_a_target.py`, candidates = grid cells. Data is
+   sparse in the current set (mining ~65 destroy events, place ~7) → **this is the
+   recapture motivation**: a mining-heavy frozen set sampled at *event* granularity.
+2. **Recapture for power + the path target.** (a) More combat for the entity
+   pointer (n=260, val=65 is thin); (b) mining-heavy for block_pos; (c) enrich
+   `BaritoneState.snapshot()` to expose the MineProcess/GoalProcess **path target**
+   (currently `goal` is ~null because mining ≠ CustomGoalProcess) so movement heads
+   get their proper input rather than the inertia/cadence proxy.
+3. **Closed-loop swap** — the real predict→replace test. Drive the body from
+   `rung_a_target` (a neural target-selector) and measure behavioral equivalence vs
+   Wurst KillAura. The 0.86→0.52 (cadence-stripped) and persistence-wins gaps are
+   the *offline* shadow of the distribution-shift the swap will expose.
+4. **Climb to rung B** — predict `baritone_state` from tool-call + obs, so the net
+   generates the command rung A consumes (A∘B = Baritone-free executor).
+
+### 11d. Gotchas specific to rung A
+
+- **`delta_tick` is teacher-forcing-only.** It encodes the gap to the *previous*
+  packet — a closed-loop driver decides that gap, so it can't be an input. Any
+  head that leans on it is not a driver. Prefer fields/pointers that need
+  world-state (aim *value*, target *identity*).
+- **Event-sample, don't packet-sample.** Destroy/attack events are <2% of packets;
+  training on the raw stream drowns them. Filter to the event type first.
+- **`interact.entity_id` ↔ `entity_set.runtime_id`** join is 100% in
+  `frozen_combat` (tick-aligned). The label is the dist-sorted *index*; nearest is
+  index 0, so the `nearest` baseline = P(label==0) = 0.48.
+
+## 12. Next sprint — Measure the moat (2026-05-28 handoff)
+
+Organizing question (per `embodiment.md` §0/§7): *where in the rate tower does the
+symbolic layer actually reach?* This sprint produces the first number for it and
+completes the §6 pointer story along the way. Three ordered tracks, each with an
+unambiguous completion marker (ml.MD §10 pivot discipline). **By design this
+sprint's scope ends at "plan the next sprint" — observe results, then update
+approach; don't pre-plan further.**
+
+### 12.0. Housekeeping (first)
+Commit the rung-A session bundle (this §11 + `experiments/next_packet/rung_a_{driver,aim,target}.py`
++ the README update). Decide on `.vscode/`, `scratch.txt`, `scripts/bigN20_easy_*.sh`
+(stage or gitignore). **Done:** working tree clean; `embodiment.md` §9's ref to
+this §11 resolves.
+
+### 12.1. `block_pos` pointer head — primary quick win (offline)
+Build `rung_a_block.py`, mirror of `rung_a_target.py`: candidates = `block_grid`
+cells (resolve the sidecar palette), label = the `START_DESTROY_BLOCK` /
+`use_item_on` `block_pos` mapped to a grid index; per-candidate MLP →
+segment-softmax pointer. Baselines: "block in the crosshair" (raycast from pose),
+"nearest targetable face."
+- *Why:* the entity pointer closed at 0.985 (§11a); this is the missing half of
+  the §6 pointer gap and the marquee unverified §8c prediction.
+- *Risk:* sparse (~290 destroy events across both frozen regimes).
+- **Done:** a val-acc number + verdict — pointer closes, **or** it's data-starved,
+  which *quantifies* the Track-2 recapture need. Both are results.
+
+### 12.2. Targeted recapture — the enabler (homunculus change)
+One capture run that unblocks the rest. Three changes:
+1. **Enrich `BaritoneState.snapshot()`** to expose the `MineProcess`/`GoalProcess`
+   **path target** (`goal` is ~null today because mining ≠ CustomGoalProcess) →
+   the servo head's proper input instead of the `pathing` bool.
+2. **Mining-heavy, event-dense** rollouts → enough `block_pos` events to make 12.1
+   conclusive.
+3. **A content-narrating-intent arm** — Haiku, or Qwen prompted to narrate intent
+   in `content` separate from the tool call — so `g_t ≠ current_tool` (breaks the
+   §8a collapse). *Prerequisite for 12.3.*
+- *Gotchas (§10c):* deploy = kill→cp→relaunch (never over a running jar); arm
+  sidecar→sleep 0.25s→packets; `TICK_COUNTER` cumulative; `.venv/bin/python`.
+- **Done:** frozen set on disk, manifest written, tick-join verified,
+  `baritone_state.goal` non-null, narrated `g_t` distinct from tool.
+
+### 12.3. Intent half-life / moat-width — the headline
+On the narrated recapture: train a decoder `g_t ← (obs window)` and plot **decode
+accuracy vs ticks-since-last-tool-call**. The decay is the moat width — how long
+the planner's command stays legible in the embodied stream before the fast loop's
+dynamics wash it out.
+- *Why it needs 12.2:* on current data `g_t == current_tool`, so decoding is
+  trivially "what is the body doing" — it measures tool *duration*, not intent
+  *persistence*. Narrated intent separates them.
+- **Done:** the curve + a one-line read ("intent legible ~N ticks → the symbolic
+  layer reaches ~X of the rate tower").
+
+### Deferred (presuppose a trained executor we don't have)
+Closed-loop swap (needs the packet-injection path + a servo); emergent sub-goal
+probe (`embodiment.md` §8 — needs a recurrent executor to probe); continuous-`g_t`
+graft (`embodiment.md` §7 Q2).
+
+**If time is tight:** 12.1 + the narrated arm of 12.2 alone still moves the ball.
