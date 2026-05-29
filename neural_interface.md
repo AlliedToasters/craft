@@ -1054,10 +1054,54 @@ dynamics wash it out.
 - *Why it needs 12.2:* on current data `g_t == current_tool`, so decoding is
   trivially "what is the body doing" — it measures tool *duration*, not intent
   *persistence*. Narrated intent separates them.
-- **Done:** the curve + a one-line read ("intent legible ~N ticks → the symbolic
-  layer reaches ~X of the rate tower").
+- **Done (2026-05-29) — `rung_c_moat.py`, framing (a) within-rollout segment
+  recovery.** Per rollout, a *segment* = a maximal run of packets sharing one `g_t`
+  string (27 segments/rollout, ≈1 per LLM turn). A torch multinomial-logistic head
+  (linear softmax, embodied features only — kinematics + velocity + stats +
+  inventory + wire packet-type; `current_tool` *excluded* by default) recovers WHICH
+  segment is active; accuracy is binned by `ticks_since_g_t_issued`. Two splits:
+  - *random* (stratified holdout, leaky upper bound): **overall 0.960** (chance
+    0.037); curve **flat-high**, lift +0.86→+0.96 across all 12 tick bins, freshest
+    bin only slightly lower (0.898). Shape: no decay, slight rise.
+  - *block* (hold out each segment's temporal tail — honest, no adjacent-packet
+    leakage): **overall 0.792, seed-stable** (0.794 @ seed1). Curve climbs 0.44 at
+    the freshest bin (0–116 ticks) to a ~0.75–0.91 plateau through the bulk (out to
+    ~1400 ticks ≈ 70 s); `READ: RISES`, pearson(lift, ticks)=+0.27.
+  - *ablation* (block, `--with-tool`): **0.894**, +0.10 over no-tool — and
+    `current_tool` is **many-to-one** with segment (rollout-0: 5/11 tools span ≥2
+    segments; `craft` alone spans 10), so the tool label is *not* a trivializing
+    leak — it cannot disambiguate same-tool segments. The embodied state already
+    carries ~the intent on its own (0.79 without it). NB the with-tool curve reads
+    `DECAYS` (fresh +0.89 → late +0.68): the tool one-hot pins the segment hardest
+    right after issuance and blurs as the same tool recurs later — the *opposite* of
+    the no-tool curve, and further evidence the embodied-only signal is the honest
+    measure of persistence.
+- **The headline — NO MOAT DECAY (the pre-registered "flat-high = finding"
+  branch).** Intent legibility does not wash out over the inter-turn interval; it is
+  flat (random) to rising (block) across the *entire* segment lifetime. The dip at
+  the freshest block-split ticks is a **transition/length artifact**, not decay: the
+  freshest held-out packets come from the shortest, most ambiguous transitional
+  segments *and* from the post-issuance motor transient. Mechanistically: between
+  LLM turns the substrate (Baritone/Wurst) deterministically executes exactly the
+  issued command, so the body is a near-stationary readout of the active intent for
+  the whole segment. **The symbolic layer reaches the full depth of the rate tower
+  within an intent's lifetime — the moat is the entire segment width.** Extends
+  rung A: there the *decision* (tool, attack-target) is decodable; here it stays
+  decodable for as long as it is the active command. The planner's authority is not
+  eroded by fast-loop dynamics within a turn.
+- *Refinement flagged:* the block split's fresh-tick bins are segment-length-
+  confounded (a test packet at tick-bin t came from a segment ≥ ~t long). A
+  per-segment *within-segment* decay curve (decode at start→end of each individual
+  segment, a different split that can see each segment's head) would isolate pure
+  persistence from the length confound. The current two splits already bound the
+  answer (flat-to-rising, no decay); this would sharpen the fresh-tick shape.
+- *Run:* `.venv/bin/python -m experiments.next_packet.rung_c_moat --split block
+  --bins 12 --out <csv>` (add `--split random` / `--with-tool` / `--seed N`).
 
-**▶ PICK UP HERE (next session — §12.3 is pure offline, no live MC):**
+**▶ §12.3 DONE (2026-05-29) — `rung_c_moat.py` shipped, headline = no moat decay
+(see the "Done"/"headline" bullets above). The reference notes below are retained
+as the dataset/codec guide for the flagged within-segment refinement and any future
+work on the narrated set.**
 - *Data:* `results/frozen_narrated/` (gitignored, ~1 GB), 5 rollouts, 100% join.
   Per rollout: `packets.jsonl` (light per-tick obs) + `sidecar.jsonl.gz` (heavy:
   `block_grid`, `entity_set`, `baritone_state`). Join packets↔sidecar by
