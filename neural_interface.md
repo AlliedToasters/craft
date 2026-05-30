@@ -1625,3 +1625,240 @@ target from rung 0), neural codec architecture search beyond the single chosen
 family, and any rung-B/meta-controller work. Observe the knee, then plan §16.
 **Load-bearing reuse:** the §14 Rung-2 driver + codec-off control + position-based
 arrival are the harness; §15 adds the lossy codec and the path-error/bits axes only.
+
+## 16. Next sprint — The first *learned* codec (2026-05-30 plan)
+
+Organizing question: *§15's scalar quantizer is a memoryless, obs-blind floor. The
+controller's loss-tolerance is structured (drift-fatal, dropout-benign) and the move
+stream is highly predictable from obs (§B: `move_player_pos_rot` R0 NLL **0.316**).
+Can a codec that **conditions on the obs the decoder already has** exploit that
+predictability to go below the quantizer's bit floor — without reintroducing the
+stationary drift that kills the controller?*
+
+This is the **A↔B convergence sprint**. Sprint A measured *what the controller
+tolerates* (drift fatal, dropout benign — `results/sprintA/RESULTS_zero_mode_ab.md`).
+Sprint B measured *how predictable the move stream is from obs* (NLL 0.316, "compressible
+*because* predictable" — `results/sprint_b/RESULTS.md`). A conditional learned codec sits
+exactly at that intersection: it is the artifact that unifies them. Building it **is** the
+GAP synthesis the original brief asked for — without picking a winner.
+
+**Scope (locked 2026-05-30, user + colleague):** ONE family — a **conditional
+autoencoder** (`5 floats + obs → latent d → 5 floats`); the latent dim `d` is the
+lossiness knob. ONE target type — **move** family only. The final family pick is still
+the 16.0 deliverable, but 16.0 is biased to characterize *for* the conditional AE.
+NOT a codebook, NOT a family bake-off, NOT multi-packet-type.
+
+### 16.0. Characterize the *conditional* residual → spec the objective (offline, no wire changes)
+Pure offline analysis over the frozen corpus (`results/frozen_{narrated,combat}`,
+~36k narrated move+obs packets on disk — no new capture). Deliverables, each a number:
+- **The compression ceiling.** How many *effective* bits does each move field carry
+  *given* obs (pos, last yaw/pitch, on_ground, horizontal_collision, g_t)? §B already
+  says pos_rot is near-R0-predictable; quantify the residual entropy of `pos` (Δ vs obs),
+  `rot` (abs yaw/pitch), bools — *conditioned* on obs. This residual is the floor a
+  conditional AE can reach; it bounds how far below `zero_preserving@b5` learning *could*
+  buy.
+- **The objective spec — the load-bearing artifact.** §15 proved an MSE/L2 objective
+  will "rediscover" `zero_biased` (trade a tiny stationary bias for lower average
+  distortion → walk into the rubberband). So the loss is NOT plain reconstruction. Write
+  it down here: **(i) hard-zero the at-rest reconstruction** (stationary input → exactly-0
+  pos delta out, structurally if possible — e.g. a learned still/moving gate — not just
+  penalized); **(ii) asymmetric penalty** that treats stationary drift as expensive and
+  moving-delta dropout as cheap (the A finding as a loss term); **(iii)** a rate term on
+  the latent (the d sweep, or a KL/entropy penalty) so compression is an explicit
+  objective, not an accident of bottleneck width.
+- **DECISION OUTPUT:** confirm conditional AE (or, if the residual analysis argues
+  otherwise, justify the deviation), fix the obs feature set fed to encoder+decoder
+  (must be **decoder-reconstructable** — no rollout-id, no Baritone path; §B anti-pattern
+  #2 carries over verbatim), and freeze the objective.
+
+**16.0 RESULT (2026-05-30) — DONE.** `experiments/codec_loop/cond_residual.py`
+(offline, no training); `results/sprint16/RESULTS_cond_residual.md` +
+`cond_residual_{narrated,combat}.json`. Three-level bits/packet ladder at the §15
+parity-safe grid: fixed-point alloc **18.45** → marginal entropy (free arith-coder)
+**9.14** → conditional entropy **1.81** b/pkt (10.2× vs alloc; combat 7.9× agrees).
+**Headline: the conditional prize is ROTATION, not position.** Pos is already at its
+floor (`zero_preserving@b5` marginal 0.46 b/axis; conditioning adds 0.07–0.09 — no
+learnable pos prize). yaw/pitch carry ~4 bits ABSOLUTE but only **0.2–0.5 bits coded
+RELATIVE to `obs.{yaw,pitch}`** (per-tick turn median 0.6°, p99 ≈ 154° snap tail;
+obs confirmed pre-packet per-tick → live-faithful). **VERDICT: most of the 8–10×
+is a FREE deterministic reparameterization, not learning.** The honest baseline a
+learned codec must beat is therefore **≈1.8 b/pkt** (obs-relative rotation + pos on
+zero_preserving + per-field arithmetic coding), NOT the 18.45 alloc. Family confirmed
+(**conditional AE**); frozen objective (see RESULTS §"FAMILY + OBJECTIVE SPEC"):
+(1) **input rotation MUST be obs-relative** — itself the dominant win, and a concrete
+`craft/codec/move.py` change (it carries rotation absolute today, move.py:22);
+(2) structural at-rest gate (hard-zero pos at rest; gate temporally coherent, run≈13–26
+ticks → ~free); (3) latent rate term; (4) NOT MSE/L2 (rediscovers zero_biased); (5)
+decoder-reconstructable inputs only, by-rollout split. Sharpened §16.2 null: if the AE
+can't beat obs-relative-reparam, the stream's compressibility is a deterministic
+reparameterization, not learnable structure — a crisp falsifiable outcome.
+
+### 16.1. Train + offline fidelity gate (offline, before any live run)
+
+**16.1 BASELINE-FIRST RESULT (2026-05-30) — DONE (offline leg).**
+`experiments/codec_loop/obsrel.py` (`quantize_move_obsrel`: every move field a
+zero_preserving delta vs obs — pos already is, yaw→`wrap180(yaw−obs.yaw)`,
+pitch→`pitch−obs.pitch`) + `obsrel_baseline.py` (RD measurement).
+`results/sprint16/RESULTS_obsrel_baseline.md` + `obsrel_baseline_{narrated,combat}.json`
+(sha `0606d1c6…`/`42bafb72…`); codec tests 105 pass. **(1) obs-relative DOMINATES the
+rate-distortion frontier:** the §15 parity point absolute@b5 = yaw RMSE 3.36° @ 8.0 bits;
+obs-rel matches that fidelity at b3 = **0.37 bits (~22× rotation-rate cut), zero learning**
+— total ≈ the §16.0-predicted 1.8 b/pkt. **(2) zero-mean-at-rest holds for the CAMERA:**
+obs-rel at-rest RMSE = 0.25° FLAT across b8→b2 (still player → residual-0 → obs.yaw
+exactly), while absolute injects a static heading offset growing 2.6°@b5 → 28°@b2 — the
+§15 pos zero-bias on the rotation channel. So the principled codec MUST code rotation
+obs-relative. **The honest baseline-to-beat (~1.8 b/pkt) is already excellent with zero
+learning → §16.2's null is live.** **16.1 LIVE PARITY DONE (2026-05-30).** `obsrel_live.py` + `server.py` `obsrel` mode;
+`results/sprint16/RESULTS_obsrel_live.md` + `obsrel_live_{d8,combined}.json`
+(sha `12bca6e9…`/`9a782799…`). Swept obs-relative rotation b6→b2 (pos near-lossless) AND
+the full baseline codec (pos zp@b5 + obs-rel rot b5→b3) on agent0/peaceful. **HEADLINE:
+rotation deadband is BENIGN for navigation — reach=1.0 at EVERY level down to b2 (180°
+steps), control=1.0**; codec machinery clean throughout (drift=0, subst_err=0,
+transport_err=0, p99 5–10 ms). §15 dropout-tolerance extends to the rotation channel
+(Baritone re-issues heading each tick → deadbanded micro-turns re-sent free). (v1 sweep's
+flat reach=0.5 was an arena-platform-edge confound at delta=28, NOT codec — fixed
+delta→8.) **HONEST CAVEAT: goto-reach is rotation-INSENSITIVE** (position carries
+navigation; server-seen yaw near-cosmetic for a goto) → necessary-not-sufficient. §11a's
+**block-target = gaze** says rotation IS load-bearing for mine/attack/place — those
+aim-dependent behaviors are where a rotation knee could still live and are UNTESTED here.
+→ **§16.2 scoping signal:** the baseline holds navigation parity ~for free with huge
+rotation headroom, so the AE has ~nothing to prove on navigation; to give the learned
+codec a parity test it can fail, the live arm needs an AIM-dependent task, not just gotos.
+
+- Implement the conditional AE as a registered `encode/decode` pair behind a flag (the
+  identity codec stays default; lossy/learned is opt-in per the §14 seam — same seam §15's
+  quantizer uses). Reuse the §13.1 train harness pattern (`rung_a_target_train.py`):
+  by-rollout split (held-out rollouts, never random — §B leakage lesson), PyTorch cu128.
+- **Offline fidelity gate FIRST (cheap, before live):** `decode(encode(x))` vs `x` over the
+  held-out frozen set. Two checks, both must pass: (a) per-field error distribution in a
+  sane band; (b) **the zero-mean-at-rest check is the gate** — stationary RMSE ≈ 0 (this is
+  the §15 prior made into a pass/fail; an AE that fails it is pre-disqualified from going
+  live, no fleet time wasted). Sweep latent dim `d` ∈ {2,4,8,16} and report the
+  fidelity/effective-bits frontier offline.
+- **Effective bits** = the latent's actual coded size (d × per-dim bits, or measured
+  entropy of the quantized latent), reported on the same axis as §15's `float_bits` so the
+  curves overlay.
+
+**16.1 LEARNED-CODEC RESULT (2026-05-30) — §16.2 NULL CONFIRMED (offline).**
+`ae_headroom.py` (preflight) + `ae_train.py` (conditional β-VAE);
+`results/sprint16/RESULTS_ae.md` + `ae_headroom_narrated.json` (sha `21a58442…`) +
+`ae_rd.json` (sha `7e0c457d…`). The obs-relative baseline is already a per-field lag-1
+conditional coder, so a learned codec's only headroom is cross-field/temporal structure.
+**Measured directly:** cross-field MI ≤ **0.27 b/pkt** and almost all of it a *boolean*
+(on_ground×moving 0.268; I(yaw;pitch)=0.032) — **rotation residuals are independent,
+~0 learnable**; the only big temporal structure is a position still/moving GATE
+(0.96→0.23 given prev = deterministic RLE, on the saturated pos channel), rotation has
+~none. The β-VAE confirms: it traces an RD curve and the **zero-mean-at-rest gate PASSES
+across the whole curve** (at-rest pos RMSE ~0.005 b = 30× under the §15 fatal threshold;
+at-rest yaw ~0.4–0.5°; degrades safely to "hold" at zero rate) — the §16.0 objective
+works, but there is no cross-field structure to exploit. **CONFOUND flagged:** the VAE's
+continuous-Gaussian rate is NOT directly comparable to the baseline's uniform-quantize
+rate (~0.25 b/dim scheme overhead would overstate a learned win) — the verdict rests on
+the scheme-independent MI, not raw bits. **VERDICT: on this stream the move-codec's
+compressibility IS the deterministic obs-relative reparam; learning buys nothing beyond
+it (≤0.27 b/pkt, ~0 on rotation).** A live AE-on-wire sweep (below) is **moot for
+compression** — the AE doesn't beat the baseline and the baseline already saturates
+navigation parity (§16.1-live). The genuine open thread is **aim-dependent parity of the
+deterministic baseline** (mine/attack/place; §11a block=gaze), untested here → §17 with an
+aim harness, NOT a goto.
+
+### 16.2. Live parity sweep — THE TEST (rung 2) — SUPERSEDED (see 16.1 learned-codec result: null reached offline)
+- Sweep `d` (each setting = one Rung-2 live run via `experiments/codec_loop/run_rungs.py`,
+  position-based arrival + codec-off control — the §14/§15 harness unchanged; only the
+  sidecar's codec swaps from quantizer to the learned net).
+- **Headline deliverable: parity-vs-effective-bits curve, learned AE vs the
+  `zero_preserving@b5` quantizer at matched bits.** Y = behavioral parity (targets-reached
+  AND per-leg path-error within codec-off noise); X = effective bits/packet.
+- **Pre-registered PASS:** there exists a `d` with effective bits **< b5** that holds
+  **lossless behavioral parity** AND **zero-mean-at-rest**, *beating the quantizer at
+  matched bits*. **If the AE does NOT beat the quantizer → learning bought nothing on this
+  stream, and that is the clean reportable finding** (consistent with §B: a stream this
+  R0-predictable may already be near its memoryless floor).
+
+### 16.3. Sequencing & scope discipline
+16.0 (characterize → spec objective) **first and alone** — no net code until the residual
+analysis sizes the prize and the objective is frozen. Then 16.1 (train + the
+zero-mean-at-rest fidelity gate), then 16.2 (live sweep → curve). **Sprint ends at the
+learned-vs-quantizer parity-vs-bits curve with a verdict on whether conditioning beats the
+memoryless floor.** Live runs stay **peaceful** (no mobs perturbing the gotos). Out of
+scope: codebook/other families beyond the AE, multi-packet-type codecs, swing/discrete
+action codecs, any rung-B/meta-controller work, and the Sprint B combat backfill (deferred,
+not this sprint). **Load-bearing reuse:** §14 Rung-2 driver + codec-off control +
+position-based arrival + §15's sidecar lossy seam + §13.1 train harness — §16 adds only the
+conditional AE and the zero-mean-at-rest objective/gate.
+
+## 17. Next sprint — Aim-dependent parity: where does the wire carry the *decision*? (2026-05-30 plan)
+
+Organizing question: *§16 proved the move-packet's rotation is near-cosmetic for
+**navigation** — the obs-relative codec deadbands turns to 180° steps and the controller
+still reaches every goto, because position carries navigation and Baritone re-aims the
+camera client-side each tick. But goto-reach is **rotation-insensitive by construction**.
+§11a found the opposite for **aim**: the block target collapses to **gaze** (you must look
+at a block to mine it; attack/place are the same servo channel). So: for aim-dependent
+behaviors, **which wire field actually carries the target — and how lossy can it be before
+aim breaks?*** This completes the parity characterization of the codec we'd ship (it carries
+the *whole* action stream, not just movement), and it sets up the real learned-codec target:
+the **discrete decision channel** (§11a/§13 attack-target 0.985, block-pointer) which —
+unlike the mechanical, Baritone-path-following move stream (§16 null) — carries genuine
+intent and may actually be learnable-compressible.
+
+**The hypothesis to test first (and why diagnosis comes before any lossy aim codec).**
+In Minecraft the *targets* of aim actions are carried **explicitly in their own packets**,
+not via the move-packet yaw: block-break = `ServerboundPlayerAction{blockpos, face}`,
+attack = `ServerboundInteract{entity_id}`, place/use = `ServerboundUseItemOn{BlockHitResult}`.
+The move-packet yaw is largely render/anti-cheat. **So the likely finding is that move-
+rotation loss is benign even for aim** (the client aims correctly regardless of the wire;
+the action packet names its target) — which would EXTEND §16 ("rotation near-free") from
+navigation to all behaviors. The *real* aim knee would then live in lossy-compressing the
+**discrete action packets' target fields** (block_pos / entity_id), which is the §11a
+pointer channel + the deferred Sprint B `interact`/`use_item_on` cells. Don't build a lossy
+aim codec until 17.0 says which field carries aim (the §14/§16 lesson: measure the carrier
+before encoding it).
+
+### 17.0. Diagnose the aim carrier (live probe, no new codec)
+For a fixed aim task (mine one known block; attack one spawned passive), run the §16
+obsrel sidecar at MAX move-rotation lossiness (b2, 180° steps) vs lossless, and judge an
+**aim-sensitive** outcome (block broken? entity hit? break-time?). Separately, perturb the
+*action packet's* target field. **DELIVERABLE = the verdict on the load-bearing carrier:**
+(a) if move-rotation@b2 breaks aim → rotation is load-bearing for aim and 17.1 finds the
+move-rotation aim knee; (b) if move-rotation@b2 is benign (the predicted case) → the target
+lives in the action packet → 17.2 is the real test (lossy discrete-target codec). Either
+outcome is a clean result; (b) is the more interesting one (it isolates the decision channel).
+
+### 17.1. The aim parity harness + the move-rotation arm
+- **New build (the one piece §16 doesn't give):** an aim driver that places/locates a known
+  target and drives a mine/attack with an aim-sensitive metric (blocks-broken / hits-landed
+  / break-time-vs-control), the aim analog of `obsrel_live.py`'s goto-reach. Reuse the §14
+  Rung-2 substitution + §16 obsrel sidecar mode wholesale.
+- Sweep move-rotation bits (the §16 `obsrel` knob) → an **aim**-parity curve (not a goto
+  curve). Confirms/refutes that move-rotation loss is benign for aim; if benign, it extends
+  the §16 "rotation near-free" result to the full behavior set (the deterministic
+  obs-relative codec is free for everything tested) — the binding operating point is then
+  set by aim, and we report it.
+
+### 17.2. (conditional on 17.0=b) The discrete-target codec — where learning might finally matter
+- If aim lives in the action packets, lossy-compress their target fields: quantize
+  `use_item_on.block_pos` (a pointer into the block grid — §11a), bucket/embed
+  `interact.entity_id` (the §13.1 attack-target pointer, decodable at 0.985). Find the knee
+  where mining/attack breaks.
+- **This is the natural home for a LEARNED codec** in a way the move stream was not: §16
+  showed the continuous move stream is all-reparam/no-structure because it is Baritone-path-
+  following (mechanical); the discrete decision channel carries real intent (§11a/§13) and
+  is highly *predictable from obs* (attack-target 0.985 from `entity_set` geometry), so a
+  conditional codec there could drop the explicit target and **reconstruct it from obs** —
+  the genuine "predict the decision, not the packet" codec (§11a), now on the wire. Whether
+  it holds aim parity is the §18 question; §17 only finds the knee + the headroom.
+
+### 17.3. Sequencing & scope discipline
+17.0 (diagnose the carrier) **first and alone** — no lossy aim codec until the probe says
+which field carries aim. Then 17.1 (move-rotation aim arm — cheap, pure §16 reuse), then
+17.2 only if 17.0 points to the action packets. **Sprint ends at the aim-parity verdict:
+which wire field carries aim + the knee where aim breaks.** Out of scope: training the
+learned discrete codec (that's §18 if 17.2 shows headroom), combat-AI/hunting improvements,
+and the non-peaceful narrated recapture (separate deferred Sprint B item — though 17 may
+reuse `results/frozen_combat`). Runs are **non-peaceful only where attack needs a mob**
+(spawn a single passive; otherwise peaceful + a placed block target). **Load-bearing
+reuse:** §14 Rung-2 substitution + §16 `obsrel` sidecar mode + the codec passthrough; §17
+adds only the aim driver (new metric) and, in 17.2, lossy quantization of the discrete
+target fields. **This closes the codec's parity story (move=§16, aim=§17) and tees up §18 =
+the learned discrete-decision codec — the actual neural interface the doc is named for.**

@@ -40,6 +40,7 @@ from typing import Any
 from craft.codec.base import decode, encode, fields_close, registered_types
 from craft.codec.move import MoveAction
 from experiments.codec_loop.quantize import POS_MODES, float_bits, quantize_move
+from experiments.codec_loop.obsrel import quantize_move_obsrel
 
 DEFAULT_PORT = 25600
 DEFAULT_HOST = "127.0.0.1"
@@ -75,6 +76,17 @@ _POS_RANGE: float | None = None
 # when pos_bits is set. Default preserves every prior sweep byte-for-byte.
 _POS_MODE: str = "zero_biased"
 
+# obsrel: §16.1 baseline. When True, the MOVE family is quantized via
+# `quantize_move_obsrel` — rotation is coded as a zero_preserving residual vs
+# obs.{yaw,pitch} (the decoder's last-known rotation) instead of absolute, then
+# reconstructed back to absolute so `decode` is unchanged. §16.0/16.1 found the
+# whole conditional-coding prize is here: yaw/pitch carry ~4 bits absolute but
+# ~0.4 obs-relative, and obs-relative holds heading at-rest exactly (no camera
+# zero-bias). This live mode tests whether rotation DEADBAND is benign like pos
+# deadband (§15). Only takes effect when quant is active (yaw/pitch bits set).
+# Default False preserves every prior §15 sweep byte-for-byte.
+_OBSREL: bool = False
+
 # --- lightweight load instrumentation (fleet strain gauge) -------------------
 # Counts roundtrips and tracks concurrent in-flight requests so a sweep can read
 # /healthz and SEE whether the single shared server is the operational ceiling
@@ -107,12 +119,13 @@ def _quant_snapshot() -> dict[str, int | None]:
         return dict(_QUANT)
 
 
-def _full_snapshot() -> dict[str, float | str | None]:
-    """quant bits + pos_range span + pos_mode, for /healthz and /config."""
+def _full_snapshot() -> dict[str, float | str | bool | None]:
+    """quant bits + pos_range span + pos_mode + obsrel, for /healthz and /config."""
     with _QUANT_LOCK:
-        snap: dict[str, float | str | None] = dict(_QUANT)
+        snap: dict[str, float | str | bool | None] = dict(_QUANT)
         snap["pos_range"] = _POS_RANGE
         snap["pos_mode"] = _POS_MODE
+        snap["obsrel"] = _OBSREL
         return snap
 
 
@@ -133,6 +146,12 @@ def _set_pos_mode(pos_mode: str) -> None:
     global _POS_MODE
     with _QUANT_LOCK:
         _POS_MODE = pos_mode
+
+
+def _set_obsrel(obsrel: bool) -> None:
+    global _OBSREL
+    with _QUANT_LOCK:
+        _OBSREL = obsrel
 
 
 def _quant_active(q: dict[str, int | None]) -> bool:
@@ -171,8 +190,17 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
         with _QUANT_LOCK:
             pr = _POS_RANGE
             pm = _POS_MODE
+            obsrel = _OBSREL
         try:
-            if pr is not None:
+            if obsrel:
+                # §16.1 baseline: rotation coded obs-relative (residual vs
+                # obs.{yaw,pitch}), reconstructed to absolute. obs is the
+                # pre-packet per-tick snapshot the decoder holds live.
+                kw = {"pos_bits": pb, "yaw_bits": yb, "pitch_bits": ptb, "pos_mode": pm}
+                if pr is not None:
+                    kw["pos_range"] = pr
+                action = quantize_move_obsrel(action, obs, **kw)  # type: ignore[arg-type]
+            elif pr is not None:
                 action = quantize_move(action, pos_bits=pb, yaw_bits=yb,
                                        pitch_bits=ptb, pos_range=pr, pos_mode=pm)
             else:
@@ -287,6 +315,12 @@ class _Handler(BaseHTTPRequestHandler):
                                     "error": f"pos_mode must be one of {sorted(POS_MODES)}"})
                 return
             _set_pos_mode(pm)
+        if "obsrel" in body:
+            orl = body["obsrel"]
+            if not isinstance(orl, bool):
+                self._respond(400, {"ok": False, "error": "obsrel must be a bool"})
+                return
+            _set_obsrel(orl)
         snap = _full_snapshot()
         _log.info("quant config -> %s", snap)
         self._respond(200, {"ok": True, "quant": snap})
