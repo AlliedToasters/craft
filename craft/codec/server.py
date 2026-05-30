@@ -41,6 +41,7 @@ from craft.codec.base import decode, encode, fields_close, registered_types
 from craft.codec.move import MoveAction
 from experiments.codec_loop.quantize import POS_MODES, float_bits, quantize_move
 from experiments.codec_loop.obsrel import quantize_move_obsrel
+from experiments.codec_loop.blockpos import BLOCK_REACH, ABS_RANGE, quantize_block_pos
 
 DEFAULT_PORT = 25600
 DEFAULT_HOST = "127.0.0.1"
@@ -106,6 +107,18 @@ _PERTURB_SPATIAL_ACTIONS = frozenset({
     "START_DESTROY_BLOCK", "ABORT_DESTROY_BLOCK", "STOP_DESTROY_BLOCK",
 })
 
+# blockpos: §17.2.1 lossy DISCRETE-TARGET codec (a real codec, unlike perturb).
+# When set, the block_pos field of a block-targeted action (use_item_on place /
+# spatial player_action dig) is quantized between encode and decode so the
+# substituted wire packet carries the quantization error — the discrete-channel
+# analog of the §16 move quantizer. Spec (all optional bar bits):
+#   {"bits": 4, "mode": "obsrel"|"absolute", "reach": 6.0, "abs_range": 8192.0}
+# mode=obsrel codes block_pos - round(player_pos) over ±reach (the §16 reparam,
+# ~4 bits lossless); mode=absolute quantizes the raw world coord over ±abs_range
+# (~14 bits to resolve 1 block — the foil). Reconstructs to integer block_pos so
+# the Java reconstructor rebuilds a valid packet. None => block_pos lossless.
+_BLOCKPOS: dict[str, Any] | None = None
+
 # --- lightweight load instrumentation (fleet strain gauge) -------------------
 # Counts roundtrips and tracks concurrent in-flight requests so a sweep can read
 # /healthz and SEE whether the single shared server is the operational ceiling
@@ -146,6 +159,7 @@ def _full_snapshot() -> dict[str, Any]:
         snap["pos_mode"] = _POS_MODE
         snap["obsrel"] = _OBSREL
         snap["perturb"] = _PERTURB
+        snap["blockpos"] = _BLOCKPOS
         return snap
 
 
@@ -178,6 +192,12 @@ def _set_perturb(perturb: dict[str, Any] | None) -> None:
     global _PERTURB
     with _QUANT_LOCK:
         _PERTURB = perturb
+
+
+def _set_blockpos(blockpos: dict[str, Any] | None) -> None:
+    global _BLOCKPOS
+    with _QUANT_LOCK:
+        _BLOCKPOS = blockpos
 
 
 def _apply_perturb(packet_id: str, decoded: dict[str, Any],
@@ -258,6 +278,30 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
             return {"ok": False, "decoded": None,
                     "error": f"quantize {type(e).__name__}: {e}"}
 
+    # §17.2.1 discrete-target codec: quantize block_pos on block-targeted actions
+    # (place / spatial dig). Mutually exclusive with the MoveAction quant path
+    # above — different packet families. Like the move quant, the substituted
+    # decoded fields carry the quantization error onto the wire.
+    blockpos_lossy = False
+    with _QUANT_LOCK:
+        bp_cfg = _BLOCKPOS
+    if bp_cfg is not None:
+        try:
+            new_action = quantize_block_pos(
+                action, obs,
+                bits=int(bp_cfg["bits"]),
+                mode=bp_cfg.get("mode", "obsrel"),
+                reach=float(bp_cfg.get("reach", BLOCK_REACH)),
+                abs_range=float(bp_cfg.get("abs_range", ABS_RANGE)),
+            )
+        except Exception as e:
+            return {"ok": False, "decoded": None,
+                    "error": f"blockpos {type(e).__name__}: {e}"}
+        # quantize_block_pos returns the SAME object for non-block actions; only
+        # flag lossy when it actually touched a block-targeted packet.
+        blockpos_lossy = new_action is not action
+        action = new_action
+
     try:
         decoded = decode(action, obs)
     except Exception as e:
@@ -286,7 +330,7 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
     # MUST substitute — otherwise homunculus silently passes the original through and
     # the controller runs effectively lossless (the parity curve would be a flat
     # artifact). So ok=true under lossy; true fidelity is reported as `fidelity_ok`.
-    if quantized_bits is not None:
+    if quantized_bits is not None or blockpos_lossy:
         out: dict[str, Any] = {
             "ok": True, "decoded": decoded, "error": None,
             "lossy": True, "fidelity_ok": fidelity_ok, "float_bits": quantized_bits,
@@ -395,6 +439,25 @@ class _Handler(BaseHTTPRequestHandler):
                                         "error": "block_pos_delta must be 3 numbers"})
                     return
             _set_perturb(pt)
+        if "blockpos" in body:
+            bp = body["blockpos"]
+            if bp is not None and not isinstance(bp, dict):
+                self._respond(400, {"ok": False, "error": "blockpos must be an object or null"})
+                return
+            if isinstance(bp, dict):
+                if not isinstance(bp.get("bits"), int):
+                    self._respond(400, {"ok": False, "error": "blockpos.bits must be an int"})
+                    return
+                if bp.get("mode", "obsrel") not in ("obsrel", "absolute"):
+                    self._respond(400, {"ok": False,
+                                        "error": "blockpos.mode must be 'obsrel' or 'absolute'"})
+                    return
+                for k in ("reach", "abs_range"):
+                    if k in bp and not isinstance(bp[k], (int, float)):
+                        self._respond(400, {"ok": False,
+                                            "error": f"blockpos.{k} must be a number"})
+                        return
+            _set_blockpos(bp)
         snap = _full_snapshot()
         _log.info("quant config -> %s", snap)
         self._respond(200, {"ok": True, "quant": snap})

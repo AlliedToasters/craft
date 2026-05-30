@@ -1993,3 +1993,41 @@ combat-AI. **Sequencing:** 17.2.1 (block, cheap, confirmatory) → the obs plumb
 (entity, the discovery). **Sprint ends at:** the two knees + the headroom verdict = "where a
 learned obs-reconstruction codec has something to prove" → tees up §18, the learned
 discrete-decision codec (the neural interface this doc is named for).
+
+### 17.2.1 RESULTS — `block_pos` knee (2026-05-30, live, agent0 @ (6001,100,6000))
+
+Confirmatory, as pre-registered. New codec: `experiments/codec_loop/blockpos.py` (`quantize_block_pos`,
+the discrete analog of `quantize_move`) wired into the sidecar as a `blockpos` config mode
+(`craft/codec/server.py`), driven live by `experiments/codec_loop/blockpos_knee.py`. Metric =
+place-`@T` rate via post-server-sync world scan (placement is client-predicted; wait the
+round-trip, then read truth). Fixed place task: one stone at T = player+3x, 5 trials/cell, PEACEFUL.
+Wire integrity clean throughout: `substitute_errors=0`, `drift=0`, 35/35 substituted per cell.
+
+| cell | coding | place_ok | landed `@T` |
+|---|---|---:|---:|
+| control | lossless identity | 1.00 | 1.00 |
+| obsrel b6 | `block_pos − round(player)`, ±6 | 1.00 | 1.00 |
+| obsrel b5 | ″ | 1.00 | 1.00 |
+| **obsrel b4** | ″ | **1.00** | **1.00** |
+| obsrel b3 | ″ | 0.00 | 0.00 |
+| obsrel b2 | ″ | 0.00 | 0.00 |
+| absolute b14 | raw world coord, ±8192 | 1.00 | 1.00 |
+| absolute b8 | ″ | 0.00 | 0.00 |
+
+**Headline (matches the pre-reg exactly): no graded sub-unit tolerance — a hard cliff at the bit
+count where the dequant step crosses one block.** The block target has no scalar slack (the §17.0
++1 perturbation = a deterministic miss was its first data point; this is the full knee). The only
+compression is the **obs-relative pointer reparam, which is lossless**: coding the offset vs the
+player (bounded by the server's ~±6 reach check) reaches the floor at **~4 bits/axis**; the
+absolute foil needs **~14 bits/axis** (3.5×) for identical parity, because it must resolve the
+world-coordinate magnitude. This is the §16 result on the discrete channel — *the reparam is the
+win, learning adds nothing on the pointer itself.* **Mining covered by symmetry:** `player_action`
+(dig) carries the identical `block_pos` field via the same quantizer branch; no separate driver.
+
+**Implication for §18 (and the gate it inherits):** a learned codec's only remaining play on
+`block_pos` is **dropping the pointer entirely and reconstructing the target from obs** — i.e. the
+"predict the decision, not the packet" move. For blocks that requires the **local block grid in
+the passthrough obs** (which is pose-only today, the same plumbing gap that gates 17.2.2). So
+17.2.1 confirms there is *no lossy headroom to chase here*, and points the genuine headroom at the
+obs-reconstruction codec — exactly where 17.2.2 (`entity_id`, already obs-reconstructable to 0.985
+offline) is predicted to be the first channel that pays. NEXT = the `entity_set`→obs plumbing.
