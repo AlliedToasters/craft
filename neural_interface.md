@@ -1862,3 +1862,55 @@ reuse:** §14 Rung-2 substitution + §16 `obsrel` sidecar mode + the codec passt
 adds only the aim driver (new metric) and, in 17.2, lossy quantization of the discrete
 target fields. **This closes the codec's parity story (move=§16, aim=§17) and tees up §18 =
 the learned discrete-decision codec — the actual neural interface the doc is named for.**
+
+### 17.0 RESULTS (2026-05-30) — VERDICT (b): the action packet carries aim; move-rotation is render
+
+Live probe on agent0 (homunculus :25570), peaceful, codec sidecar :25600 + the §14
+passthrough in `substitute:true`. Two channels, both judged by an AIM-SENSITIVE outcome
+(not a sent packet). Drivers: `experiments/codec_loop/aim_carrier.py` (attack) and
+`aim_carrier_block.py` (block). Artifacts: `results/sprint17/aim_carrier_moverot.json`,
+`results/sprint17/aim_carrier_block.json`.
+
+**Attack channel** (target = `interact.entity_id`; metric = cow HEALTH drop per
+`/attack_entity` on a stationary NoAI cow at point-blank, Killaura OFF):
+
+| cell | rot step | hits landed |
+|------|---------:|------------:|
+| control (lossless) | — | 6/6 |
+| obsrel @b2 | 180° | 6/6 |
+| obsrel @b3 | 60° | 6/6 |
+
+**Block channel** (target = `use_item_on.block_pos`; metric = block landed at requested T,
+read from `level.getBlockState` via `/scan_blocks` AFTER the server round-trip — placement
+is client-PREDICTED, so the post-sync scan is the truth, not `/place_at`'s own flag):
+
+| cell | place @T | place @T+Δ |
+|------|---------:|-----------:|
+| control (lossless) | 4/4 | 0 |
+| obsrel @b2 (180°) | 4/4 | 0 |
+| obsrel @b3 (60°) | 4/4 | 0 |
+| **perturb block_pos +1x** | **0/4** | **4/4** |
+
+**Verdict = the predicted (b).** Move-packet rotation is **near-cosmetic for aim too** —
+deadbanding yaw/pitch to 180° steps (b2, near-total rotation loss) breaks NEITHER attack nor
+place. The server does not gate either action on the wire rotation; it trusts the action
+packet's own target field (`entity_id` resolved server-side; `block_pos` placed directly).
+The **block_pos perturbation is the positive carrier control**: offsetting it by +1 on the
+wire moves the placed block exactly one cell over (lands at T+1, never T) — deterministic,
+n=4/4, proving block_pos is authoritative AND that the harness can detect a broken aim (so
+the obsrel "benign" cells are a real null, not a blind metric). This **extends the §16
+"rotation near-free" result from navigation to the full behavior set** — the deterministic
+obs-relative move codec is parity-free for everything tested.
+
+**Routing:** §17.1 (the move-rotation aim knee) is therefore **moot/confirmed-null** — there
+is no rotation knee for aim because rotation isn't the carrier. The binding operating point
+lives in the **discrete target fields**, so **§17.2 is the real test**: lossy-compress
+`use_item_on`/`player_action.block_pos` (the §11a block pointer) and `interact.entity_id`
+(the §13.1 attack-target pointer, decodable at 0.985 from `entity_set` geometry) and find the
+knee where mining/attack/placing breaks. This is the natural home for a LEARNED codec — the
+discrete decision channel carries real intent and is highly obs-predictable, so a conditional
+codec there could drop the explicit target and reconstruct it from obs (the genuine "predict
+the decision, not the packet" codec, now on the wire). New substrate this added: a `perturb`
+diagnostic mode in the codec sidecar (`block_pos_delta`; entity_id deliberately NOT
+perturbable — the Java reconstructor resolves it to an Entity, so a bogus id silently falls
+back to the original packet, which is why the carrier proof runs on the clean block channel).

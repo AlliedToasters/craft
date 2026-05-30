@@ -87,6 +87,25 @@ _POS_MODE: str = "zero_biased"
 # Default False preserves every prior §15 sweep byte-for-byte.
 _OBSREL: bool = False
 
+# perturb: §17.0 aim-carrier DIAGNOSTIC (not a shippable codec). When set, the
+# decoded TARGET field of an action packet is deliberately corrupted before it is
+# reconstructed onto the wire — the positive-carrier control: if corrupting field
+# X breaks the aim-dependent action, X carries aim. Spec (all optional):
+#   {"block_pos_delta": [dx,dy,dz]}  -> offset block_pos for use_item_on and the
+#                                        spatial (dig-lifecycle) player_action
+#                                        actions. block_pos is plain ints, so the
+#                                        Java reconstructor rebuilds cleanly (no
+#                                        entity lookup) and the action targets the
+#                                        WRONG block.
+# entity_id is intentionally NOT perturbable here: the Java reconstructor resolves
+# entity_id -> Entity (level.getEntity); a bogus id yields null and the substitute
+# silently falls back to the ORIGINAL packet, so an entity_id perturbation cannot
+# be cleanly attributed. The block channel is the clean carrier probe. Default off.
+_PERTURB: dict[str, Any] | None = None
+_PERTURB_SPATIAL_ACTIONS = frozenset({
+    "START_DESTROY_BLOCK", "ABORT_DESTROY_BLOCK", "STOP_DESTROY_BLOCK",
+})
+
 # --- lightweight load instrumentation (fleet strain gauge) -------------------
 # Counts roundtrips and tracks concurrent in-flight requests so a sweep can read
 # /healthz and SEE whether the single shared server is the operational ceiling
@@ -119,13 +138,14 @@ def _quant_snapshot() -> dict[str, int | None]:
         return dict(_QUANT)
 
 
-def _full_snapshot() -> dict[str, float | str | bool | None]:
+def _full_snapshot() -> dict[str, Any]:
     """quant bits + pos_range span + pos_mode + obsrel, for /healthz and /config."""
     with _QUANT_LOCK:
-        snap: dict[str, float | str | bool | None] = dict(_QUANT)
+        snap: dict[str, Any] = dict(_QUANT)
         snap["pos_range"] = _POS_RANGE
         snap["pos_mode"] = _POS_MODE
         snap["obsrel"] = _OBSREL
+        snap["perturb"] = _PERTURB
         return snap
 
 
@@ -152,6 +172,33 @@ def _set_obsrel(obsrel: bool) -> None:
     global _OBSREL
     with _QUANT_LOCK:
         _OBSREL = obsrel
+
+
+def _set_perturb(perturb: dict[str, Any] | None) -> None:
+    global _PERTURB
+    with _QUANT_LOCK:
+        _PERTURB = perturb
+
+
+def _apply_perturb(packet_id: str, decoded: dict[str, Any],
+                   perturb: dict[str, Any]) -> bool:
+    """§17.0 carrier diagnostic: corrupt the TARGET field of an action packet
+    in-place on the decoded dict. Returns True if anything was perturbed (so the
+    caller forces ok=True and homunculus substitutes the corrupted packet)."""
+    delta = perturb.get("block_pos_delta")
+    if delta and packet_id in ("minecraft:use_item_on", "minecraft:player_action"):
+        # player_action carries block_pos for ALL actions but it's only meaningful
+        # (and on the wire from a real dig) for the spatial dig-lifecycle ones.
+        if (packet_id == "minecraft:player_action"
+                and decoded.get("action") not in _PERTURB_SPATIAL_ACTIONS):
+            return False
+        bp = decoded.get("block_pos")
+        if bp and len(bp) == 3:
+            decoded["block_pos"] = [bp[0] + int(delta[0]),
+                                    bp[1] + int(delta[1]),
+                                    bp[2] + int(delta[2])]
+            return True
+    return False
 
 
 def _quant_active(q: dict[str, int | None]) -> bool:
@@ -215,6 +262,20 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
         decoded = decode(action, obs)
     except Exception as e:
         return {"ok": False, "decoded": None, "error": f"decode {type(e).__name__}: {e}"}
+
+    # §17.0 carrier diagnostic: deliberately corrupt an action packet's target
+    # field. Independent of quant/obsrel (those touch only the MoveAction path).
+    with _QUANT_LOCK:
+        perturb = _PERTURB
+    perturbed = False
+    if perturb:
+        perturbed = _apply_perturb(packet_id, decoded, perturb)
+    if perturbed:
+        # The corruption IS the experiment — force substitution so the wrong
+        # target goes on the wire (fidelity is intentionally broken).
+        return {"ok": True, "decoded": decoded, "error": None,
+                "perturbed": True, "fidelity_ok": False}
+
     fidelity_ok = fields_close(decoded, fields, atol=1e-6)
 
     # `ok` is the SUBSTITUTION signal homunculus gates on (CodecPassthrough.java:330):
@@ -321,6 +382,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self._respond(400, {"ok": False, "error": "obsrel must be a bool"})
                 return
             _set_obsrel(orl)
+        if "perturb" in body:
+            pt = body["perturb"]
+            if pt is not None and not isinstance(pt, dict):
+                self._respond(400, {"ok": False, "error": "perturb must be an object or null"})
+                return
+            if isinstance(pt, dict) and "block_pos_delta" in pt:
+                d = pt["block_pos_delta"]
+                if not (isinstance(d, list) and len(d) == 3
+                        and all(isinstance(v, (int, float)) for v in d)):
+                    self._respond(400, {"ok": False,
+                                        "error": "block_pos_delta must be 3 numbers"})
+                    return
+            _set_perturb(pt)
         snap = _full_snapshot()
         _log.info("quant config -> %s", snap)
         self._respond(200, {"ok": True, "quant": snap})
