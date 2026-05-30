@@ -1548,3 +1548,80 @@ is live and lossless. Next sprint: first *lossy* codec through this same Rung-2 
   driver-reproducible, not a one-off. (§14.2.3 behavioural-parity-over-rollout-JSONLs
   metric deferred to the lossy-codec sprint, where a real delta can appear; under the
   identity codec the targets-reached + codec-off control already establish parity.)
+
+## 15. Next sprint — First *lossy* codec (2026-05-30 plan)
+
+Organizing question: *§14 proved the wire path can carry a **lossless** identity
+codec through a working controller. Now: how much can we throw away before the
+controller notices?* This is the first codec that **loses information on purpose** —
+the gate to the neural codec, because it answers whether the action stream has slack
+to compress at all, and gives a baseline a learned codec must beat.
+
+**Design-as-scope (this sprint's defining choice).** We are NOT pre-committing to a
+codec family (quantizer vs learned AE vs codebook). **Rung 0 below is a
+characterization pass whose *deliverable is the codec-family decision*** — measure
+the action stream's structure, then pick the codec the data argues for. This keeps us
+from training against the wrong target (the §14 lesson, one level up: don't build the
+encoding before you've measured what needs encoding).
+
+### 15.0. Characterize the action stream → DECIDE the codec (rung 0, no wire changes)
+Pure offline analysis over the frozen captures (`results/frozen_{narrated,combat,dryrun}`,
+~72.6k packet+obs records already on disk — no new capture needed to *characterize*).
+Questions to answer, each with a number:
+- **Volume by type** (measured): swing 33%, move_player_rot 31%, move_player_pos_rot
+  24% → movement ~55%, swing 33%, all discrete actions (player_input/action/command,
+  interact, use_item*) <10% combined. **Implication: compress movement first; it's
+  where the bits are.** Swing carries ~1 bit of payload (hand) at huge volume — a
+  separate, trivial story.
+- **Per-field entropy / dynamic range** of the move `semantic_fields`
+  (`pos`=Δ vs obs, `rot`=abs yaw/pitch, `on_ground`/`horizontal_collision` bools).
+  How many *effective* bits does each field actually carry? (e.g. is Δpos already
+  near-quantized by Baritone's step cadence? is yaw multimodal?)
+- **Redundancy vs obs** — how predictable is each field from the obs the decoder
+  already has (pos, last yaw/pitch, g_t, current_tool)? A field the decoder can
+  *reconstruct* from obs is free to drop (the delta-coding `MoveAction` already does
+  for `pos` is exactly this; the question is how much further it goes).
+- **DECISION OUTPUT:** a short written verdict in §15 RESULTS picking the rung-1
+  codec family + which fields/packet-type it targets, justified by the three numbers
+  above. Candidate families to weigh: (a) **fixed-point quantization** (round each
+  field to b bits — zero training, pure dimensionality probe); (b) **learned codebook**
+  (k-means a vocab from data — natural for discrete-ish / multimodal fields);
+  (c) **conditional autoencoder** (5 floats + obs → latent d → 5 floats — tests
+  whether learning buys compression a quantizer can't). Deliverable is the pick, not
+  all three.
+
+### 15.1. Build the chosen lossy codec + the parity harness (rung 1)
+- Implement the rung-0-chosen codec as a registered `encode/decode` pair behind a
+  flag (so the identity codec stays the default; lossy is opt-in per the §14 seam).
+  It must satisfy the same `Action` protocol — the only change is that `decode(encode())`
+  is no longer `fields_close` to input.
+- **Parity metric (this is the real §14.2.3, now that a delta can exist).** Reuse the
+  Rung-2 driver (`experiments/codec_loop/run_rungs.py`, position-based arrival +
+  codec-off control). Lossy-specific additions: (i) per-leg **path error** (not just
+  targets-reached binary) — RMS deviation of the codec-on trajectory from the
+  codec-off trajectory over the same goto; (ii) **bits/packet** actually shipped;
+  (iii) latency (should stay ~§14 levels — codec compute is small).
+- **Reconstruction-fidelity offline check FIRST** (cheap gate before any live run):
+  decode(encode(x)) vs x over the frozen set, report per-field error distribution.
+  Only go live once offline error is in a sane band.
+
+### 15.2. Sweep + the headline plot (rung 2 = THE TEST)
+- Sweep the codec's lossiness knob (quantizer bits b = 16,8,6,4,2; or codebook size
+  K; or latent dim d) — each setting is one Rung-2 live run via the driver.
+- **Headline deliverable: parity-vs-compression curve.** X = bits/packet (or
+  effective compression ratio over identity); Y = behavioral parity (targets-reached
+  AND path-error-within-noise-of-the-codec-off control). **PASS for the sprint =
+  there exists a setting with compression > 1× where the controller still reaches
+  targets within control-off noise.** The knee of that curve is the science.
+- If a learned codec was chosen, the quantizer at equal bits is the baseline it must
+  beat (else learning bought nothing here — itself a finding).
+
+### 15.3. Sequencing & scope discipline (ml.MD §10)
+Rung 0 (characterize → decide) **first and alone** — do not write codec code until
+the data has picked the family. Then rung 1 (codec + offline fidelity gate + parity
+harness), then rung 2 (sweep → curve). **Sprint ends at the parity-vs-compression
+curve with a knee identified.** Out of scope: multi-packet-type codecs (pick ONE
+target from rung 0), neural codec architecture search beyond the single chosen
+family, and any rung-B/meta-controller work. Observe the knee, then plan §16.
+**Load-bearing reuse:** the §14 Rung-2 driver + codec-off control + position-based
+arrival are the harness; §15 adds the lossy codec and the path-error/bits axes only.
