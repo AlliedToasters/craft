@@ -1914,3 +1914,82 @@ the decision, not the packet" codec, now on the wire). New substrate this added:
 diagnostic mode in the codec sidecar (`block_pos_delta`; entity_id deliberately NOT
 perturbable — the Java reconstructor resolves it to an Entity, so a bogus id silently falls
 back to the original packet, which is why the carrier proof runs on the clean block channel).
+
+## 17.2. The lossy discrete-target codec — where does aim break, and where might learning finally win? (2026-05-30 plan)
+
+Organizing question: §17.0 found aim rides the action packet's own target field (`block_pos`,
+`entity_id`), and its perturbation already showed **+1 block = a deterministic miss**. So the
+discrete target has no sub-unit scalar tolerance — the unit IS the floor. The real questions:
+(1) how few bits does the target need *given obs* (the headroom), and (2) does coding it
+obs-relative / as a pointer hold aim parity at that floor? This is the discrete-channel analog
+of §16 — and unlike the mechanical, Baritone-path-following move stream that produced the §16
+null, this channel carries genuine intent, so it is where a LEARNED codec might actually win.
+
+**Inherited headroom (do NOT re-measure — the §16.0 decide-then-code discipline).** Rung-A
+already sized the obs-predictability of both targets: §11a/§12.1 block pointer = crosshair
+raycast **0.93–1.0**; §13.1 attack-target = **0.985** from `entity_set` geometry. §17.2
+inherits these as the headroom and goes straight to the live knee; the new offline work is only
+to convert those accuracies into bits-to-address (block: reach-6 volume ≈ 4 bits/axis when
+coded obs-relative; entity: ≈ log2(N) for the candidate index) and the residual-given-obs
+(≈0 because of the 0.93–1.0 / 0.985 predictability).
+
+### The two channels differ sharply in cost — and that asymmetry is the scoping finding
+
+- **A. `block_pos`** (place via `use_item_on`, mine via `player_action`): plain ints, clean
+  reconstruction (proven §17.0). The obs-relative coding (`block_pos − player_block`) needs
+  **only player position, which is already in the passthrough's obs** → feasible with no
+  substrate change.
+- **B. `entity_id`** (attack via `interact`): the raw id is an arbitrary handle — it can't be
+  quantized or perturbed directly (a bogus id makes the Java reconstructor fall back to the
+  original packet, §17.0). It must be reparameterized to an **`entity_set` index** (the §13.1
+  candidate order). **But the obs the passthrough sends the codec is pose-only**
+  (`PlayerObsSnapshot` is explicitly "minimal pose; the heavy R3/R4 channels — block grid,
+  entity set — are NOT here"). So channel B requires **NEW SUBSTRATE: plumb the R3 `entity_set`
+  into the passthrough's obs payload.** That plumbing is the gate on the interesting result.
+
+### Sub-rungs (deliberately LIGHT on A, INVEST in B)
+
+- **17.2.1 — `block_pos` live knee (one confirmatory sweep, mostly §17.0 reuse).** Add a
+  `block_pos` quantizer to the sidecar (parallels `quantize_move`), two codings: *absolute
+  scalar* (predict a CLIFF at 1-block resolution — the §17.0 +1 perturbation is already its
+  first data point) and *obs-relative* (offset from player block, bounded by reach-6 → ~4
+  bits/axis lossless). Metric = the §17.0 block harness (place-@T rate, post-server-sync scan).
+  **Predicted headline:** no graded lossy tolerance — the only compression is the absolute→±6
+  pointer reparam (lossless), exactly mirroring §16 "the reparam is the win." This is *largely
+  confirmatory* and the writeup must say so. **Mining covered by symmetry:** `player_action`
+  (dig) carries the identical `block_pos` field, so the place result transfers; no separate
+  Baritone dig-aim driver (out of scope — place is the clean atomic block action).
+
+- **17.2.2 — `entity_id` live knee (the discovery; gated on the obs plumbing).** Build the
+  `entity_set`-index reparam in the codec: map `entity_id ↔ idx` (distance/geometry sorted, the
+  §13.1 candidate order), quantize/collapse the index, reconstruct via `entity_set[idx] → its
+  real entity_id → rebuild Interact` (always a VALID entity, possibly the wrong one). Lossy knob
+  = index bits kept, down to "always the geometric prediction." Metric = the §17.0 attack
+  harness **+ a decoy**: summon target T and decoy D, attack T, measure whose health drops
+  (correct vs wrong target). **Predicted headline:** collapsing to the geom-predicted entity
+  holds parity at ~0.985 (§13.1) → the entity target is genuinely obs-reconstructable LIVE — the
+  first channel with real "predict the decision, not the packet" headroom on the wire, which is
+  what hands to §18.
+
+### Pre-registered outcomes
+- `block_pos`: scalar cliff at 1 block; lossless obs-relative reparam to ~4 bits/axis; **no
+  lossy sub-unit headroom** → a learned codec's only play is dropping the pointer and
+  reconstructing from obs (§18, which needs the block grid in obs).
+- `entity_id`: collapse-to-geom-prediction holds ~0.985 parity → **real live headroom** → §18
+  has somewhere to win HERE, unlike the §16 move null. If instead it breaks parity at low index
+  bits, the entity target is less obs-determined than §13.1's offline 0.985 implied (an
+  online↔offline gap, itself a clean finding).
+
+### Scope discipline (mirrors §17.3)
+§17.2 finds the **knee + sizes the headroom**. Training the learned obs-reconstruction codec is
+**§18**. **Reuse:** §17.0 block + attack harnesses, §14 Rung-2 passthrough, §16 sidecar config
+pattern, the §13.1 candidate ordering, the inherited §11a/§13.1 accuracies. **New build:** (a) a
+`block_pos` quantizer (small, parallels `quantize_move`); (b) **the R3 `entity_set` →
+passthrough-obs plumbing** + the index-reparam interact codec (the real cost, and channel B's
+gate); (c) the decoy attack harness (intended-vs-wrong-target metric). Runs are **non-peaceful
+only for the attack/decoy arm** (spawn target + decoy passive); the block arm stays peaceful.
+**Out of scope:** the §18 learned codec, a Baritone mining-aim driver (place covers `block_pos`),
+combat-AI. **Sequencing:** 17.2.1 (block, cheap, confirmatory) → the obs plumbing → 17.2.2
+(entity, the discovery). **Sprint ends at:** the two knees + the headroom verdict = "where a
+learned obs-reconstruction codec has something to prove" → tees up §18, the learned
+discrete-decision codec (the neural interface this doc is named for).
