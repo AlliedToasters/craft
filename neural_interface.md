@@ -2473,15 +2473,15 @@ The §19 analog one rung up: §19 served the g_t-prior as the live CONTROLLER of
    offline decoder could NOT see (it had instantaneous g_t). Headline: **the corrigibility moat of a
    stateful neural controller is set by its decision cadence, not body inertia.**
 
-**The fork (depth of the neural decision) — needs a call:**
-- **(A) Trained nav goal-prior first.** Capture (scene-geometry, g_t, chosen-goal) over the beacon duel,
-  train a §13.1/§18.1-style index-over-candidates head conditioned on the nav g_t, serve its argmax.
-  Full §19 analog — the decision is genuinely LEARNED. Cost: a capture + train pass before the live wheel.
-- **(B) MVP authority-loop first.** Prove the live wheel + whose-waypoint + live-moat with the goal served
-  directly through `gt_override` (the "decision" is the served g_t→goal map, geometry-trivial), THEN graft
-  the trained prior. Stages the hard substrate part (the live control loop + the corrigibility
-  measurement) ahead of the model; faster to a decisive live corrigibility number, genuinely-neural lands
-  second.
+**Staging (fork RESOLVED 2026-05-30 → MVP authority-loop first):**
+- **§20.1a — MVP authority-loop [FIRST].** Prove the live wheel + whose-waypoint flip + live-moat with the
+  goal served directly through `gt_override` (the "decision" is the served g_t→beacon map,
+  geometry-trivial), de-risking the hard substrate part (the live control loop + the corrigibility
+  measurement) ahead of the model. Faster to a decisive live corrigibility number.
+- **§20.1b — trained nav goal-prior [SECOND, grafted onto 20.1a].** Capture (scene-geometry, g_t,
+  chosen-goal) over the beacon duel, train a §13.1/§18.1-style index-over-candidates head conditioned on
+  the nav g_t, serve its argmax in place of the trivial map → the genuinely-LEARNED decision (full §19
+  analog). The 20.1a harness is the test rig; only the policy block swaps.
 
 **Substrate — NO new homunculus code (like §20.0).** Reuses: `_summon` typed beacons (filter_capture),
 poll obs (`/position` + sidecar obs), the stop+repath override (§20.0), position scan for whose-waypoint.
