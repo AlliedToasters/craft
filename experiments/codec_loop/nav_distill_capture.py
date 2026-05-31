@@ -41,6 +41,7 @@ import argparse
 import json
 import math
 import random
+import re
 import subprocess
 import threading
 import time
@@ -106,17 +107,52 @@ def _display_geometry(display: str) -> tuple[int, int]:
     return 1280, 720
 
 
+def _mc_window_rect(display: str) -> tuple[int, int, int, int] | None:
+    """Absolute (w, h, x, y) of the Minecraft game window on `display`, parsed from
+    `xwininfo -root -tree`. Lets the grab CROP to the game view and exclude the
+    PrismLauncher console window (it floats at the display origin and otherwise
+    occludes the frame's top-left — a §21.2 contaminant nearly as bad as the path
+    overlay). Returns None if the MC window isn't found (caller falls back to the
+    full display)."""
+    try:
+        out = subprocess.run(["xwininfo", "-root", "-tree", "-display", display],
+                             capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            if "Minecraft" not in line:
+                continue
+            # e.g.  ...  854x480+213+120  +213+120   (last +X+Y is absolute)
+            m = re.search(r"(\d+)x(\d+)\+-?\d+\+-?\d+\s+\+(-?\d+)\+(-?\d+)", line)
+            if m:
+                w, h, x, y = (int(m.group(i)) for i in (1, 2, 3, 4))
+                if w > 1 and h > 1:
+                    return w, h, x, y
+    except Exception:
+        pass
+    return None
+
+
 class FrameGrabber:
     """Single-frame ffmpeg x11grab off the agent's Xvfb every `interval` s, on a
     worker thread. Each frame is named by the wall-clock ms at grab → joined to the
     nearest sidecar row's `captured_at_ms` offline. Degrades to no-frames silently
     (the §21.0 horizon curve does not depend on frames; they are §21.2 insurance)."""
 
-    def __init__(self, display: str, frames_dir: Path, interval: float):
+    def __init__(self, display: str, frames_dir: Path, interval: float,
+                 crop_to_mc: bool = True):
         self.display = display
         self.frames_dir = frames_dir
         self.interval = interval
-        self.w, self.h = _display_geometry(display)
+        # Crop to the MC game window so the PrismLauncher console (at the display
+        # origin) is excluded; fall back to the full display if not located.
+        rect = _mc_window_rect(display) if crop_to_mc else None
+        if rect is not None:
+            self.w, self.h, self.gx, self.gy = rect
+            self.cropped = True
+        else:
+            self.w, self.h = _display_geometry(display)
+            self.gx, self.gy = 0, 0
+            self.cropped = False
+        self.grab_input = f"{display}+{self.gx},{self.gy}"
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.grabbed = 0
@@ -130,7 +166,7 @@ class FrameGrabber:
             r = subprocess.run(
                 ["ffmpeg", "-y", "-loglevel", "error",
                  "-f", "x11grab", "-video_size", f"{self.w}x{self.h}",
-                 "-i", self.display, "-frames:v", "1", str(out)],
+                 "-i", self.grab_input, "-frames:v", "1", str(out)],
                 capture_output=True, timeout=8)
             if r.returncode == 0 and out.exists():
                 self.grabbed += 1
@@ -156,6 +192,7 @@ class FrameGrabber:
             self._thread.join(timeout=10)
         (self.frames_dir / "frame_index.json").write_text(
             json.dumps({"display": self.display, "geometry": [self.w, self.h],
+                        "grab_offset": [self.gx, self.gy], "cropped_to_mc": self.cropped,
                         "interval_s": self.interval, "grabbed": self.grabbed,
                         "failed": self.failed, "frames": self.index}, indent=2))
 
