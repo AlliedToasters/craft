@@ -2390,7 +2390,7 @@ model (Wurst still originates every swing + owns attack timing; neural only sele
 §19 done & verified. NEXT (later rung): time re-enters when the target is a STATEFUL heuristic
 (Baritone path/goal commitment, the §12.3/§13.2 seam) — the temporal codec, not this one.
 
-## §20 — The stateful rung: predict the PLAN, not the packet stream (§20.0 DONE)
+## §20 — The stateful rung: predict the PLAN, not the packet stream (§20.0 + §20.1a DONE)
 
 §18/§19 conquered the **memoryless** heuristic (KillAura): a same-tick, g_t-parameterized discrete
 decision. The codec learned the decision (§18), then MADE it and stayed corrigible (§19). But §19's
@@ -2498,6 +2498,56 @@ reading obs and commanding Baritone instead of configuring the packet sidecar).
 - **(Live moat)** override mid-path → the body changes course within ~2t + the controller's poll/inference
   cadence. ≈ body-redirect = corrigible-by-default live (the §20.0 null transfers); ≫ = the cadence IS the
   moat — either way a quantified live corrigibility latency for a stateful learned controller.
+
+#### §20.1a RESULTS — neural takes the navigation wheel, live; corrigible; moat = decision cadence
+
+Built `experiments/codec_loop/nav_wheel.py`, live on agent0 (peaceful window, no new homunculus
+code). A `NavWheel` control loop polls the authority command (`gt_override`, else the operator
+command), maps it to a beacon, and ISSUES the goal via the §20.0 stop+repath override (a worker-thread
+`/baritone/goto` + lock-bypassing `/baritone/stop`). Scene = two typed beacons (cow A at +12X, pig B at
+−12X); whose-waypoint = the nearer beacon at rest (final `/position` scan). All three landed:
+
+**TEST A — effectiveness (gt_override=None, codec honors the operator):** operator=A → body at A
+(dA=3.85); operator=B → body at B (dB=1.46). **2/2.** The wheel faithfully executes the commanded goal.
+
+**TEST B — corrigibility (the HEADLINE; operator FIXED=A, flip codec gt_override):**
+**codec_gt=A → body→A 5/5; codec_gt=B → body→B 5/5.** With the operator's command unchanged, the
+codec's `gt_override` decides whose-waypoint the body converges on — the navigation analog of §19's
+passive_hit 1.0→0.0, proven by where the body physically ends up. The body obeys the codec's g_t
+authority interface, not the operator's command. (First pass hit a 2/4 inter-arm
+`SESSION_LOCK`-contention stranding — a prior arm's background goto held the lock when the next arm's
+goto fired → `busy` → stranded `near=None`, NEVER `near=A`; corrigibility never lost to the operator.
+Fixed by draining the lock between arms — `/baritone/stop` returns `acked=False` once Baritone is idle =
+lock free — → clean 5/5.)
+
+**LIVE MOAT — override mid-path, latency vs controller cadence:**
+
+| cadence | moat | decision lag | body redirect |
+|--------:|-----:|-------------:|--------------:|
+| 0.05 s | 1.006 s | **0.043 s** | 0.962 s |
+| 0.50 s | 1.357 s | **0.265 s** | 1.092 s |
+
+The **decision lag scales with the poll cadence** (10× cadence → ~6× lag, ≈ the expected cadence/2 for a
+flip landing at a random point in the poll interval); the body redirect is ~cadence-independent (~1.0 s,
+the stop+repath + 180°-reversal execution). **The live corrigibility moat is set by the controller's
+DECISION CADENCE, not body inertia** — exactly what §20.0 predicted (Baritone commits in path state, not
+momentum; there is no irreducible body-momentum moat, so the moat is the rate at which the controller
+re-reads g_t, which you can shrink by polling faster). This is the corrigibility property §20.0's offline
+decoder — having instantaneous g_t — structurally could not see. (Note: the moat measures course-change
+onset; at the slow cadence the body did not always complete the full ~24-block return inside the 9 s
+window — `final_near=None` there is mid-trip, not a failed override; fast-cadence runs landed B 4/4.)
+
+Honest asymmetry from §19, restated: Baritone does NOT autonomously navigate (it only goes where
+commanded), unlike KillAura which autonomously swings — so §20.1 is less "wrest the wheel from an active
+competing heuristic" and more "the codec IS the goal source AND it is corrigible (obeys a g_t change
+mid-commitment)." The gt_override=None baseline (codec honors the operator) is the competing-command
+stand-in; setting gt_override is the override.
+
+§20.1a = MVP authority-loop (the decision is the trivial g_t→beacon map). **NEXT = §20.1b:** capture
+(scene-geometry, g_t, chosen-goal) over the beacon duel + train a §13.1/§18.1-style index-over-candidates
+head conditioned on the nav g_t, and serve its argmax in place of the trivial map — the genuinely-LEARNED
+decision (full §19 analog). The 20.1a harness IS the test rig; only the policy block swaps. Driver
+`experiments/codec_loop/nav_wheel.py`, artifact `results/sprint20/nav_wheel.json` (gitignored).
 
 ### Pre-registered outcomes
 - **(Compression)** the move stream compresses to its goal at a large ratio (stream ≫ goal bits) — the
