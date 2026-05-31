@@ -2224,8 +2224,43 @@ buys ~0.52 bits/interact, and a learned codec recovers it to the oracle ceiling.
 §18.0 on a new axis: there *learning* was the compression; here *context* is. The codec MUST carry
 `g_t` — which is what 18.2 needs live.
 
-**NEXT — 18.2 live:** the offline dataset stamped `g_t` harness-side (no jar change). For the LIVE
-codec to read `g_t` off the wire, plumb `obs.policy` (the KillAura filter toggles + Priority, via
-`Wurst.settingToJson` — the consistent homunculus↔Wurst API, never settings.json parsing) into
-`PlayerObsSnapshot.toJson`, then wire the entropy-coding interact codec into the §17.2.2 passthrough
-and confirm lossless parity. (Fleet caveat: only agent0 has the fresh entity_set jar.)
+### 18.2 RESULTS — the live g_t codec: serving the prior on the wire (2026-05-30, live agent0)
+
+18.1 stamped `g_t` harness-side. 18.2 reads it off the WIRE: the codec sidecar serves the learned
+prior and entropy-codes real interacts under `P(idx | entity_set geom, type, obs.policy)`.
+
+**Substrate (homunculus `fa4466c`):** `PlayerObsSnapshot.toJson` now carries `obs.policy` = KillAura's
+target-selection policy (Priority + Range + all ~23 `Filter*` toggles), read tick-thread via the new
+`Wurst.getSettingsMap` + `settingToJson` reflection path (the consistent homunculus↔Wurst API, no
+`settings.json` parsing). Built, deployed to agent0 (both per-agent root + template), kill-by-PID →
+deploy → relaunch. Verified live: 26-key policy on every packet, tri-state preserved
+(`Filter neutral mobs='Off'`).
+
+**Serving (`filter_prior_train.py` → `filter_prior.py` in `craft/codec/server.py`):** train+save the two
+arms with a baked calibration temperature (geom+type T=3.37, geom+type+policy T=4.61 — these small
+models are overconfident; the SERVED prior MUST carry T or its live raw CE blows up, esp. the sharper
+policy arm). The sidecar gained an `interact_prior` config + `/interact_rate` readout: per outbound
+interact ATTACK it scores the obs candidates and accumulates `-log2 P(true idx)`, auto-bucketed by the
+live `obs.policy`. LOSSLESS — read-only rate, the index pointer reconstructs the target exactly
+(entityid codec off → identity passthrough; **measured drift=0** over the run).
+
+**Harness (`filter_live.py`):** arm the passthrough, then drive KillAura over 40 mixed scenes × both
+filter modes under each served prior so real interacts flow. (Live obs is contaminated by other fleet
+players + wild creepers — out-of-vocab; the codec restricts candidates to its trained species, so OOV
+interacts skip and the modeled scene re-indexes cleanly.) 422 real interacts:
+
+| arm | mean bits | attack_all | protect_passive | n |
+|---|---|---|---|---|
+| geom+type (mode-blind) | 1.485 | 1.792 | 1.179 | 200 |
+| geom+type+policy (mode-aware) | **1.187** | 1.840 | **0.557** | 222 |
+
+**HEADLINE: the live `g_t` codec compresses real interacts +0.299 bits/interact** over the mode-blind
+prior — the §18.1 offline gain transfers to live wire data. The structure is exactly the policy: the
+win is entirely in **protect mode** (0.557 vs 1.179 — knowing passives are excluded, the prior points
+confidently at the hostile), while in attack_all (all attackable) the bit adds nothing (1.84≈1.79).
+Lossless (drift=0). So the learned discrete-decision codec runs live, reads the operator's policy off
+the wire, and pays exactly where the policy changes the decision — closing §18 end-to-end: a learned,
+g_t-conditioned interact codec carries a real controller's target losslessly at a learned rate.
+
+(Fleet caveat: only agent0 has the obs.policy jar; agents 1-9 run the stale pre-policy jar — don't mix
+in obs-dependent work.)

@@ -220,6 +220,61 @@ def _set_entityid(entityid: dict[str, Any] | None) -> None:
         _ENTITYID = entityid
 
 
+# --- §18.2 live g_t codec: serve the learned interact-target prior ------------
+# When configured with a saved bundle (filter_prior_train.py), each outbound
+# interact ATTACK is scored under P(idx | entity_set geom, type, obs.policy) and
+# the entropy-coding rate of the TRUE target index is accumulated. LOSSLESS — the
+# index pointer reconstructs the entity exactly; this only READS the rate, it
+# does not mutate the packet. The mode-aware (geom+type+policy) vs mode-blind
+# (geom+type) arms reproduce the §18.1 g_t gap on live wire interacts.
+_INTERACT_PRIOR: dict[str, Any] | None = None
+_INTERACT_RATES: list[dict[str, Any]] = []
+_INTERACT_LOCK = threading.Lock()
+
+
+def _set_interact_prior(cfg: dict[str, Any] | None) -> str | None:
+    """Load (or clear) the served prior. Returns an error string or None on OK."""
+    global _INTERACT_PRIOR
+    if cfg is None:
+        with _INTERACT_LOCK:
+            _INTERACT_PRIOR = None
+            _INTERACT_RATES.clear()
+        return None
+    try:
+        from experiments.codec_loop.filter_prior import load_prior
+        prior = load_prior(str(cfg["path"]))
+    except Exception as e:  # noqa: BLE001 - surface load failure to the caller
+        return f"{type(e).__name__}: {e}"
+    with _INTERACT_LOCK:
+        _INTERACT_PRIOR = prior
+        _INTERACT_RATES.clear()
+    return None
+
+
+def _interact_rate_stats() -> dict[str, Any]:
+    with _INTERACT_LOCK:
+        prior = _INTERACT_PRIOR
+        rates = list(_INTERACT_RATES)
+    n = len(rates)
+
+    def _mean(rs):
+        return sum(r["rate_bits"] for r in rs) / len(rs) if rs else None
+
+    fp_on = [r for r in rates if r["filter_passive"]]
+    fp_off = [r for r in rates if not r["filter_passive"]]
+    return {
+        "armed": prior is not None,
+        "arm": prior["arm"] if prior else None,
+        "path": prior["path"] if prior else None,
+        "n": n,
+        "mean_bits": _mean(rates),
+        "mean_bits_protect_passive": _mean(fp_on),
+        "mean_bits_attack_all": _mean(fp_off),
+        "argmax_acc": (sum(r["argmax_correct"] for r in rates) / n) if n else None,
+        "mean_cands": (sum(r["n_cands"] for r in rates) / n) if n else None,
+    }
+
+
 def _apply_perturb(packet_id: str, decoded: dict[str, Any],
                    perturb: dict[str, Any]) -> bool:
     """§17.0 carrier diagnostic: corrupt the TARGET field of an action packet
@@ -345,6 +400,23 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
         entityid_lossy = new_action is not action
         action = new_action
 
+    # §18.2 live g_t codec rate: score the TRUE interact target under the served
+    # prior and accumulate -log2 P(true idx). Lossless / non-mutating — reads the
+    # original target from `fields`; the index pointer reconstructs it exactly.
+    with _INTERACT_LOCK:
+        prior = _INTERACT_PRIOR
+    if prior is not None and packet_id == "minecraft:interact" \
+            and fields.get("action") == "ATTACK":
+        try:
+            from experiments.codec_loop.filter_prior import interact_rate
+            r = interact_rate(prior, obs, fields.get("entity_id"))
+        except Exception as e:  # noqa: BLE001 - never let scoring break the roundtrip
+            r = None
+            _log.warning("interact_rate failed: %s", e)
+        if r is not None:
+            with _INTERACT_LOCK:
+                _INTERACT_RATES.append(r)
+
     try:
         decoded = decode(action, obs)
     except Exception as e:
@@ -411,6 +483,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/config":
             self._respond(200, {"ok": True, "quant": _full_snapshot()})
+            return
+        if self.path == "/interact_rate":
+            self._respond(200, {"ok": True, "interact_prior": _interact_rate_stats()})
+            return
+        if self.path == "/interact_rate/reset":
+            with _INTERACT_LOCK:
+                _INTERACT_RATES.clear()
+            self._respond(200, {"ok": True, "interact_prior": _interact_rate_stats()})
             return
         self._respond(404, {"ok": False, "error": f"unknown route {self.path}"})
 
@@ -530,9 +610,23 @@ class _Handler(BaseHTTPRequestHandler):
                     self._respond(400, {"ok": False, "error": "entityid.abs_range must be a number"})
                     return
             _set_entityid(eid)
+        if "interact_prior" in body:
+            ip = body["interact_prior"]
+            if ip is not None and not isinstance(ip, dict):
+                self._respond(400, {"ok": False,
+                                    "error": "interact_prior must be an object or null"})
+                return
+            if isinstance(ip, dict) and not isinstance(ip.get("path"), str):
+                self._respond(400, {"ok": False, "error": "interact_prior.path must be a string"})
+                return
+            err = _set_interact_prior(ip)
+            if err is not None:
+                self._respond(400, {"ok": False, "error": f"interact_prior load failed: {err}"})
+                return
         snap = _full_snapshot()
         _log.info("quant config -> %s", snap)
-        self._respond(200, {"ok": True, "quant": snap})
+        self._respond(200, {"ok": True, "quant": snap,
+                            "interact_prior": _interact_rate_stats()})
 
     def do_POST(self) -> None:  # noqa: N802 - http.server convention
         if self.path == "/config":
