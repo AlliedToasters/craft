@@ -2276,6 +2276,20 @@ decision; KillAura's own pick is discarded on the wire. The question the embodim
 (g_t as authority interface, recurrence=corrigibility boundary) has been building toward: once a
 neural model makes the call, does the operator still hold the wheel?
 
+### Time dependency: same-tick, feedforward (and why that's correct here)
+§19 makes the decision from the SAME-TICK obs the interact packet already carries (`entity_set`
+geometry + `obs.policy`) — `P(target | same-tick obs)`, no history. This is not a shortcut: it is the
+correct shape because the heuristic being replaced is itself feedforward — KillAura re-picks its
+target every tick from the current candidates + filter settings, carrying no cross-tick state — and
+§18.0 confirms the deciding information is fully present same-tick (0.985 accuracy; the ~1.5% residual
+is geometry near-ties, not a memory gap). §19 is the "take the wheel" rung of the larger program:
+bottom-up neural replacement of the Wurst/Baritone heuristic stack, starting with the cleanest
+heuristic (discrete, same-tick, g_t-parameterized target selection). Time re-enters only at a LATER
+rung — when we climb from a memoryless heuristic (KillAura) to a STATEFUL one (Baritone commits to a
+path/goal and does not re-derive it each tick; the §12.3 intent-half-life / §13.2 handover seam). That
+is where same-tick obs becomes insufficient and recurrence earns its keep — the temporal codec, not
+this rung.
+
 ### Mechanism (reuse 18.2 sidecar + 17.2.2 substitution)
 - Sidecar `entityid` gains a **`neural` substitution mode**: the served prior's argmax index →
   `entity_set[idx].id` becomes the decoded `entity_id`, `ok=true` forced (lossy substitution, like
