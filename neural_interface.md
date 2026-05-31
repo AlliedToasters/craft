@@ -2390,7 +2390,7 @@ model (Wurst still originates every swing + owns attack timing; neural only sele
 §19 done & verified. NEXT (later rung): time re-enters when the target is a STATEFUL heuristic
 (Baritone path/goal commitment, the §12.3/§13.2 seam) — the temporal codec, not this one.
 
-## §20 — The stateful rung: predict the PLAN, not the packet stream (SCOPED)
+## §20 — The stateful rung: predict the PLAN, not the packet stream (§20.0 DONE)
 
 §18/§19 conquered the **memoryless** heuristic (KillAura): a same-tick, g_t-parameterized discrete
 decision. The codec learned the decision (§18), then MADE it and stayed corrigible (§19). But §19's
@@ -2474,3 +2474,75 @@ Related: [[project_embodiment_design]] (recurrence = corrigibility boundary; g_t
 the §12.3 NO-moat-decay + §13.2 ~6.4t completion-handover results (this rung's direct ancestors),
 §16 move-codec null (the per-tick floor this rung clears at the plan level), §18/§19 (the discrete
 "predict the decision" the navigation channel now mirrors at the plan level).
+
+### §20.0 RESULTS — goal codec offline: STRONG compression headroom + a clean corrigibility NULL
+
+Built `experiments/codec_loop/goto_override_capture.py` (capture) +
+`goto_codec_measure.py` (measure). Live on agent0 (port 25570), peaceful window,
+no new homunculus code. Capture: 5 rollouts × 6 nav legs per mode, 100% packet↔
+sidecar tick-join everywhere; **completion** = blocking `/baritone/goto` to arrival
+then stamp next g_t (body AT REST at the flip); **override** = fire the goto on a
+worker thread, ~2.5s in (`speed_at_flip≈0.15`, body MID-PATH) stamp the new g_t then
+`/baritone/stop` (lock-bypassing) + re-path (body AT SPEED at the flip). g_t stamped
+via `/obs/meta` = the nav-goal segment label; `baritone_state.goal` is the ground
+truth (verified to track the stamp). Totals: completion 30 seams / 6460 moves,
+override 25 seams / 1629 moves. Measure: §16 obs-relative per-packet bits (b=5,
+the zero_preserving baseline-to-beat) for the stream side; rung_c_transition VERBATIM
+(margin 40, holdout 10, bin 4, seed 0) for the rel-crossover.
+
+**PART A — Compression: STRONG positive (the move stream compresses to its goal).**
+A move segment is the run of move packets under one committed goal. Coding the goal
+as an index into the controller's waypoint set (the nav analog of §17.2.2's pointer):
+
+| mode | b/pkt | seg≈moves | stream bits | goal(index) | **stream/index** | goal(delta) | stream/delta |
+|------|------:|----------:|------------:|------------:|-----------------:|------------:|-------------:|
+| completion | 4.35 | 208 | 28068 | 64 | **437×** | 558 | 50× |
+| override   | 1.83 | 47  | 2985  | 81 | **37×**  | 630 | 4.7× |
+
+The ratio scales ~linearly with commitment length (per-segment: 66 moves→112×,
+115→260×, …), because goal_bits is fixed (~2 b/segment) while stream_bits ∝ n_move.
+This is the plan-level headroom §16 never measured: §16 coded each packet in
+ISOLATION and found a per-tick null (~2 b/pkt, no learnable structure beyond the
+reparam); here the stream pays that ~2-4 b/pkt **per packet** while the goal that
+generates the whole stream pays it **once**. Parallel to §18's discrete-decision
+headroom; unlike §16's per-tick floor. **"Predict the plan, not the packet stream"
+is real — a committed Baritone move stream is ~40-440× redundant against its goal.**
+
+**PART B — The override moat: a clean NULL (corrigible-by-default even when stateful).**
+The §13.2 rel-crossover (`rel=p_new/(p_old+p_new)`), crossover offset measured from
+the g_t-issue tick (= offset 0 by construction: the capture stamps g_t AT the seam):
+
+| seam type | crossover | long-new | decoder acc | seams |
+|-----------|----------:|---------:|------------:|------:|
+| completion | 2.22 t (0.111s) | 1.97 t | 0.965 | 26 |
+| override   | 2.40 t (0.120s) | 3.09 t | 0.996 | 30 |
+
+**MOAT = override − completion = +0.18 t (+0.01s)** pooled; +1.1 t (+0.055s)
+length-controlled (long-new) — at most ~1 tick of extra inertia, well inside the
+~2-3 tick handover itself. Decoder interior accuracy 0.965/0.996 → the goal is
+STRONGLY legible from embodied features (this is the NULL branch, NOT the
+informative-failure "decoder at chance" branch). The mechanism: a forced override
+redirects the body's decodable intent essentially as fast as a natural completion,
+because **Baritone carries its commitment in PATH STATE, not body momentum** — MC
+movement has negligible inertia, and `/baritone/stop`+re-path (the substrate's REAL
+override, identical to what the evasion/water_aversion reflexes do) replaces the
+path within ~0.1s. The pre-registered "≈ completion" null: the stateful executor is
+corrigible-by-default at the move-stream level. (Caveat: this measures the
+stop+repath override — the only override the lock-holding `/baritone/goto` substrate
+exposes; a hypothetical soft in-place goal-swap is not available to test.)
+
+**Secondary cross-check — the LLM origination latency, isolated.** Completion
+handover WITHOUT an LLM in the loop = 2.2 t (0.11s) here; §13.2's completion handover
+WITH the LLM = 6.4 t (0.32s). The ~4 t (~0.21s) difference is the LLM→Baritone
+origination latency — quantifying exactly what the §13.1 neural-swap bypasses (the
+body handover alone is ~2 t; the LLM turn is the other ~4 t).
+
+Verdict: §20.0 lands BOTH pre-registered outcomes — the compression positive (large
+stream/goal ratio, plan-level headroom exists) AND the corrigibility null (override ≈
+completion, no commitment-inertia moat at the body level, with a fully-legible
+decoder). The codec headroom for the move channel is at the PLAN level (predict the
+goal), and the stateful executor surrenders authority on demand. §20.1 (live: serve
+the goal-codec + gt_override goal, drive Baritone to a neural-inferred waypoint, the
+whose-waypoint-the-body-converges-on analog of §19's whose-HP-drops) is the gated
+follow-on. Drivers: `goto_override_capture.py`, `goto_codec_measure.py`;
+data results/sprint20/{completion,override}/, results/sprint20/measure.json.
