@@ -2646,7 +2646,7 @@ data results/sprint20/{completion,override}/, results/sprint20/measure.json.
 
 ---
 
-## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (SCOPED)
+## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (§21.0 DONE)
 
 §20 cut Baritone into a three-layer rate tower (goal → A* planner → path → follower → move
 stream) and located the neural real estate: NOT the planner (don't relearn A* — it's the
@@ -2742,3 +2742,79 @@ cut + path-state corrigibility this builds on), §16 (the follower null below th
 the world model), [[project_embodiment_design]] (recurrence/corrigibility boundary; perception replacing
 search is the maturation of the substrate-as-load-bearing thesis), [[reference_headless_observability]]
 (the frame-grab the visual rungs need).
+
+### §21.0 RESULTS — the horizon curve (DONE, verified)
+
+**Substrate add (one piece, as scoped).** `BaritoneState.snapshot()` already read `positions()`
+internally but emitted only `path_next`/`path_dest`; now it also emits `path_fwd` (the forward path
+slice from the executor's current node, bounded to `PATH_FWD_MAX=96`) + `path_idx`. So the window-exit
+subgoal at ANY radius is computed offline from one capture — the whole r-sweep replays without
+recapture, exactly the §17.2.2 `entity_set` plumbing pattern. Built, deployed to agent0's per-agent
+root, bounced agent0 only ([[feedback_jar_deploy_over_running]]); verified live (`path_fwd` of 26 nodes
+on a test goto). The other agents run the stale jar — agent0 only, as ever.
+
+**Capture (`nav_distill_capture.py`).** The TickSidecarRecorder line IS the dataset — after the add it
+carries `block_grid` (r=10 terrain) + `path_fwd` (target) + `path_dest` (bearing), joined by tick. No
+packet recording (the move stream is §16's follower null; the neural object lives at the path level).
+12 rollouts, random_spawn across biomes (dark_forest, savanna, forest×3, plains×3, taiga,
+sunflower_plains, snowy_plains, grove), 3 long random-heading gotos each — terrain VARIETY is
+load-bearing (flat → straight path → trivial horizon by construction; the many `unreachable`/`timeout`
+legs are the forced detours we want). **23 871 usable rows.** Throttled Xvfb frames captured in parallel
+(0.5 s cadence, ~2 000 PNGs) — forward-investment for §21.2, used by nothing in §21.0.
+
+**Analysis (`nav_horizon.py`).** Predict Baritone's window-exit subgoal at a FIXED action radius
+`target_r` from a terrain window of SWEPT radius `feat_r` — decoupling the two is the experiment (the
+target/decision is held constant; only how far the head SEES varies, so accuracy(feat_r) is a clean
+"how far must you look" curve). Held out by ROLLOUT (terrain generalisation). Target = the subgoal's
+DEVIATION from straight-line bearing (16-way, centred on straight), features = a BEARING-ALIGNED local
+map (rotate so goal-forward is canonical) of three channels — **walkable floor** (nearest standable
+level), **blocked** (wall/trunk/void), **water**. Reported as the tail-averaged held-out accuracy (not
+test-argmax — mild leakage on a small subset).
+
+Two methodology corrections were load-bearing and are the lesson of this rung (an absolute-frame raw
+heightmap gave an unreadable, overfit curve):
+- **Bearing-aligned + relative-deviation** killed the overfit. Absolute-frame aggregate accuracy
+  *declined* 0.54→0.32 with feat_r and CE *exploded* 4.9→12.8 b (the MLP relearning the bearing→sector
+  map 16× with no weight sharing); the aligned/relative reframe flattened aggregate to ~0.7–0.77 stable
+  and CE to ~3 b. The navigation-correct symmetry (one "given terrain ahead, deviate Δ" policy) is what
+  generalises across biomes.
+- **Walkable floor, not max-height.** Leaves/logs are solid, so a max-height "surface" made the tree
+  CANOPY the terrain in every forested biome (half the capture) — Baritone walks UNDER the canopy
+  weaving between trunks. Switching to floor + a blocked-column channel turned the detour-subset signal
+  from erratic noise (0.0↔0.4) into a clean monotone rise.
+
+**Three readings (one experiment).** Driver: `nav_horizon.py`; sweep `results/sprint21/sweeps/`; plot
+`results/sprint21/horizon.png` (`nav_horizon_plot.py`).
+
+1. **Most local navigation is bearing-trivial.** At the action radius the window-exit subgoal equals
+   "head straight at the goal" (within ±1 sector) **76 %** of the time (target_r=5; detour_frac=0.24).
+   And the detour fraction FALLS as the action radius grows — 26 % (r=3) → 24 % (r=5) → **13 % (r=8)**:
+   a farther subgoal sees past local wiggles back toward the goal, so navigation gets MORE bearing-trivial
+   the farther out you place the subgoal. The straight-line baseline is the right policy for the bulk of
+   local nav; the residual is a minority of genuine detours.
+
+2. **The navigation HORIZON tracks the ACTION RADIUS.** On the detour subset (where straight-line scores
+   0 by construction), terrain's recovery of the subgoal rises monotonically with the feature window and
+   then plateaus — and *the rate of rise and the radius at which it plateaus scale with `target_r`*:
+   target_r=3 plateaus by feat_r≈3–4 (peak 0.146@5), target_r=5 by ≈5–6 (0.135/0.128@5, seed-stable),
+   target_r=8 only reaches its plateau by feat_r≈8 (0.002→0.125@8). You must see out to roughly where the
+   subgoal is — **no farther** (seeing past the action envelope does not help). The affordance radius IS
+   the planning horizon, as the §21 design predicted. (Soft knee, not razor-sharp; the *ordering* across
+   three independent action radii + seed-stability is the robust signal.)
+
+3. **The detour residual is large (~0.87) — the size of the job handed to §21.1/§21.2.** Even at the
+   horizon, the local floor/block/water map recovers only ~12–15 % of detour directions; ~87 % of
+   detours are NOT predictable from local terrain. The signal is real (monotone rise, tracks `target_r`,
+   seed-stable) but WEAK — local geometry within the action envelope barely dents the detour. This
+   **resolves §20.0's open caveat**: the 437× "move-stream→goal compresses" figure presumed a decoder
+   that re-runs Baritone (A* in the reconstructor), conflating the cheap move→path compression (no A*)
+   with the expensive path→goal inversion (= A*). The horizon residual is exactly that inversion job: the
+   local window explains a thin slice; the rest is global (the A* the substrate gifts) or needs richer
+   perception. **That residual is the §21.1 (bearing ablation — which detours are scene-inferable) and
+   §21.2 (visual — can pixels supply what the floor map can't) agenda**, and it is why the bootstrap is
+   in-service of the world-model north star rather than a dead end.
+
+**Artifacts.** `experiments/codec_loop/nav_distill_capture.py` (capture),
+`experiments/codec_loop/nav_horizon.py` (analysis), `experiments/codec_loop/nav_horizon_plot.py` (plot);
+`results/sprint21/capture/` (12 rollouts, sidecars + frames), `results/sprint21/sweeps/` (target_r×seed
+JSONs), `results/sprint21/horizon.png`. Homunculus: `BaritoneState.java` `path_fwd`/`path_idx`.
