@@ -66,6 +66,28 @@ def _cam_rel_angle(yaw_deg: float, goal_ang: float) -> float:
     return math.atan2(fx * gz - fz * gx, fx * gx + fz * gz)
 
 
+def _row_yaw(d):
+    """Player camera yaw for the tick. Prefer a top-level `yaw` (post the sidecar
+    add), else recover it from entity_set's SELF player entry — §17.2.2 already
+    records each entity's yaw, and self is the minecraft:player nearest origin (the
+    capture box spawns agents far apart, so the only nearby player is self). Returns
+    None if no anchorable yaw. MC yaw is unwrapped (can exceed 360); sin/cos handle it."""
+    if "yaw" in d:
+        return d["yaw"]
+    origin = d.get("origin")
+    if not origin:
+        return None
+    cx, cz = origin[0] + 0.5, origin[2] + 0.5
+    best, bestd = None, None
+    for e in d.get("entity_set") or []:
+        if "player" not in str(e.get("type", "")).lower() or "yaw" not in e:
+            continue
+        dd = (e.get("x", 1e9) - cx) ** 2 + (e.get("z", 1e9) - cz) ** 2
+        if bestd is None or dd < bestd:
+            bestd, best = dd, e["yaw"]
+    return best if (bestd is not None and bestd <= 4.0) else None
+
+
 def _load_frame(path: Path, size: int) -> np.ndarray:
     """RGB frame → (3, size, size) float32 in [0,1]."""
     with Image.open(path) as im:
@@ -113,8 +135,9 @@ def load_visual_samples(capture_dir: Path, target_r: int, size: int, ms_tol: int
             if abs(row_ms[k] - ms) > ms_tol:
                 continue
             d = rows[k]
-            if "yaw" not in d:
-                continue                       # pre-yaw capture → unusable for §21.2
+            yaw = _row_yaw(d)
+            if yaw is None:
+                continue                       # no anchorable camera yaw → skip
             bs = d.get("baritone_state") or {}
             fwd, dest = bs.get("path_fwd"), bs.get("path_dest")
             if not fwd or len(fwd) < 2 or not dest:
@@ -127,7 +150,7 @@ def load_visual_samples(capture_dir: Path, target_r: int, size: int, ms_tol: int
             if tgt is None:
                 continue
             devc, dyc = tgt
-            rel = _cam_rel_angle(d["yaw"], goal_ang)
+            rel = _cam_rel_angle(yaw, goal_ang)
             gvec = _global_vec(dest, origin, target_r)
             vec = np.asarray([math.sin(rel), math.cos(rel), *gvec], dtype=np.float32)
             fp = rdir / "frames" / fr["file"]

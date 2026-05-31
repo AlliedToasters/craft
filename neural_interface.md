@@ -2646,7 +2646,7 @@ data results/sprint20/{completion,override}/, results/sprint20/measure.json.
 
 ---
 
-## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (§21.0, §21.1 DONE)
+## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (§21.0, §21.1, §21.2 DONE)
 
 §20 cut Baritone into a three-layer rate tower (goal → A* planner → path → follower → move
 stream) and located the neural real estate: NOT the planner (don't relearn A* — it's the
@@ -2902,3 +2902,64 @@ the structured sidecar, tick-aligned in one run), NOT pure re-analysis. Secondar
 Xvfb grab also caught the PrismLauncher log window in the corner — want a maximized/focused MC window (and
 optionally the `/hud` clean-recording toggle) for the recapture. The banked frames remain useful as a
 pipeline smoke-test only.
+
+### §21.2 RESULTS — pixels don't crack the horizontal detour (DONE, first-pass)
+
+The visual rung, finally on clean frames. **Capture (concurrent fleet):** `./fleet.sh cycle 20` +
+`scripts/sprint21_visual_capture.sh` fanned `nav_distill_capture` across 19 in-world agents → 38 rollouts,
+**17 biomes**, 66k with-path ticks, 4 497 frames, ~8 min wall-clock (vs ~70 min sequential — concurrent is
+the permanent mode). All clean-frame switches held per agent: baritone/render off, `/hud` off, chat hidden
+(`chatVisibility:2` per-instance), launcher console cropped out (grab cropped to the MC window rect),
+Fullbright pinned (lighting as a controlled variable). Two capture bugs caught live: a shared `--seed` put
+18/19 agents in ONE dark_forest (fixed: per-agent seed → 17 biomes); and the visual rung needs per-tick
+camera **yaw** to anchor a first-person frame to the world-frame target — which turned out to already be in
+the sidecar inside `entity_set`'s self-player entry (§17.2.2 records every entity's rotation), so
+`nav_visual` reads yaw from there (a redundant top-level `yaw` field was also added; harmless).
+
+**Analysis (`nav_visual.py`).** One sample per frame (nearest sidecar row by `captured_at_ms`), **3 709**
+paired samples, 38 rollouts, by-rollout split (same as §21.0/§21.1). A small CNN over the 96px frame ⊕ the
+goal direction relative to the camera yaw → the SAME deviation-from-bearing sector + Δy target. THE CONTROL
+is `cam_only` (no pixels, the goal-relative-to-camera vector only) — the visual analog of §21.1's
+`bearing_only`: the camera yaw already encodes Baritone's CURRENT heading (≈ "the subgoal is where I'm
+already pointing"), so it's a near-free, *privileged* detour predictor (a plan readout, not perception).
+
+| arm | detour ±1 | aggregate ±1 | Δy acc |
+|---|---|---|---|
+| structured (§21.0, cross-rung) | ~0.12 | — | — |
+| **cam_only** (heading, no pixels) | **0.264 ± 0.021** | 0.866 | 0.564 |
+| **full_visual** (CNN + cam vec) | 0.237 ± 0.017 | 0.848 | **0.646** |
+
+**Three readings (`results/sprint21_visual/visual.png`):**
+
+1. **Pixels add nothing to the horizontal detour.** full_visual − cam_only = **−0.03 ± ~0.02** (≈ 0, the CNN
+   slightly *overfits* the horizontal head on 3.7k samples). The frame can't anticipate the detour beyond
+   what the current heading already implies. This is the §21.2 form of §21.0/§21.1's verdict: the horizontal
+   detour residual stays hard — **perception does not replace the horizontal search at this scale.**
+
+2. **The camera heading dominates, and beats structured terrain (0.26 vs 0.12).** Because the window-exit
+   subgoal at r=5 is ≈ where Baritone is already steering, simply knowing the current heading (the camera
+   yaw) predicts the detour twice as well as a static r=6 floor/block/water map. The strongest signal for
+   "the local plan" is a *readout of the plan in progress*, not perception of terrain.
+
+3. **Pixels DO help on Δy — elevation is the one terrain signal the frame carries (0.65 vs 0.56).** The CNN
+   is not inert: it reads vertical structure (cliffs/steps) that the horizontal heading can't encode. Vision's
+   marginal value at this scale is *elevation*, not horizontal routing. (Suggestive — needs a Δy
+   majority-class baseline to fully nail, since Δy skews to "level".)
+
+**Honest scope (first-pass, locked for now):** small CNN, 3 709 samples, 96px, and a frame that looks down
+the *current* heading (the obstacle forcing the NEXT bend may be peripheral or out of view); a larger model /
+more data / higher res could move the horizontal story, though the Δy gain shows the CNN extracts terrain
+when the signal is present. `cam_only` is a privileged plan-readout baseline — the kinder framing is
+full_visual (0.24) > structured (0.12): pixels beat a static local map, but via the heading-correlated view,
+not new terrain information.
+
+**Arc takeaway across §21.0–21.2.** The window-exit subgoal is overwhelmingly "head where you're already
+heading"; the genuine detours are a small, hard residual (~0.87 unrecovered) that neither finer goal
+precision (§21.1), nor structured local terrain (§21.0, 0.12), nor pixels (§21.2, ~0 gain over heading)
+crack. Baritone's global A* inversion is doing real work that local perception — at this scale — does not
+reproduce. The "perception replaces search" thesis holds for the easy 76% (aim at goal) and for *elevation*,
+but the horizontal-routing residual is where search still earns its keep.
+
+**Artifacts.** `experiments/codec_loop/nav_visual.py` (analysis), `nav_visual_plot.py` (plot),
+`scripts/sprint21_visual_capture.sh` (concurrent capture); `results/sprint21_visual/visual.json` + `.png`;
+homunculus `TickSidecarRecorder` yaw/pitch add (redundant — `entity_set` already had it).
