@@ -2445,12 +2445,59 @@ to §19, only the decision is now a GOAL, not a target, and it persists.
 3. **Override-seam moat (THE HEADLINE):** run the §13.2 rel-crossover on OVERRIDE transitions; compare
    handover latency to the §13.2 COMPLETION latency (~6.4t). The gap = the corrigibility moat.
 
-### §20.1 (live) — neural takes the wheel on navigation  [FOLLOW-ON, gated on §20.0]
-The §19 analog: serve the goal-codec; "take the wheel" = drive Baritone toward the NEURAL-inferred goal,
-with a `gt_override` that forces a goal decoupled from the operator's actual command. Corrigibility LIVE:
-override the goal mid-path, measure ticks-until-the-body-changes-course (the moat as a live property of
-the learned controller) — the navigation analog of §19's whose-HP-drops is whose-waypoint-the-body-
-converges-on.
+### §20.1 (live) — neural takes the wheel on NAVIGATION  [SCOPED, gated on §20.0 (DONE)]
+The §19 analog one rung up: §19 served the g_t-prior as the live CONTROLLER of a MEMORYLESS decision
+(attack target) and proved corrigibility by whose-HP-drops; §20.1 does it for the STATEFUL decision
+(the Baritone goal) and proves it by **whose-WAYPOINT-the-body-converges-on**.
+
+**Settled architecture:**
+1. **The decision is a LATENT GOAL → the wheel is at the CONTROL layer, not a wire rewrite.** §19 could
+   overwrite `entity_id` because the target was a FIELD on the packet the server trusts (§17.0,
+   [[reference_server_trusts_client_target]]). A nav goal lives in Baritone's `customGoalProcess`, on NO
+   move packet. So §20.1's "take the wheel" = the served codec ISSUES the goal via the §20.0
+   stop+repath override — a control-loop policy, NOT a per-packet substitution. This is SIMPLER than §19
+   in plumbing: no netty send-thread, no per-packet latency budget. A driver polls obs, the prior
+   decides, the driver commands `/baritone/goto`. No packet sidecar needed for the override.
+2. **Decisive metric = whose-waypoint-the-body-converges-on** (final position scan) — the navigation
+   twin of whose-HP-drops. The body physically arriving at the NEURAL goal (not the operator's) = neural
+   took the navigation wheel.
+3. **g_t = the authority interface; `gt_override` forces it.** Scene = two typed beacons (the §19/§20.0
+   duel geometry); the served prior selects WHICH beacon is the goal conditioned on g_t; `gt_override`
+   forces that g_t decoupled from the operator's command. Default nav g_t = **seek/avoid** — the
+   structural twin of §18.1's attack/protect: the g_t bit flips the goal between beacon-A and beacon-B.
+4. **The LIVE moat = override the goal mid-path, measure ticks-until-the-body-changes-course.** §20.0
+   (offline) found NO body-level moat (stop+repath redirects in ~2t/0.1s; Baritone commits in PATH STATE,
+   not body momentum). §20.1 measures the moat of the LEARNED CONTROLLER itself: a live neural loop must
+   NOTICE the g_t change before it can act, so the live moat = body-redirect (~2t) + the controller's
+   **decision-cadence lag** (poll interval + inference). This is the corrigibility property §20.0's
+   offline decoder could NOT see (it had instantaneous g_t). Headline: **the corrigibility moat of a
+   stateful neural controller is set by its decision cadence, not body inertia.**
+
+**The fork (depth of the neural decision) — needs a call:**
+- **(A) Trained nav goal-prior first.** Capture (scene-geometry, g_t, chosen-goal) over the beacon duel,
+  train a §13.1/§18.1-style index-over-candidates head conditioned on the nav g_t, serve its argmax.
+  Full §19 analog — the decision is genuinely LEARNED. Cost: a capture + train pass before the live wheel.
+- **(B) MVP authority-loop first.** Prove the live wheel + whose-waypoint + live-moat with the goal served
+  directly through `gt_override` (the "decision" is the served g_t→goal map, geometry-trivial), THEN graft
+  the trained prior. Stages the hard substrate part (the live control loop + the corrigibility
+  measurement) ahead of the model; faster to a decisive live corrigibility number, genuinely-neural lands
+  second.
+
+**Substrate — NO new homunculus code (like §20.0).** Reuses: `_summon` typed beacons (filter_capture),
+poll obs (`/position` + sidecar obs), the stop+repath override (§20.0), position scan for whose-waypoint.
+Path-A reuses `filter_prior_train`/`filter_prior` (§18.1) + the §13.1 head. The served codec is a
+control-loop driver (the `neural_wheel.py` pattern — own the prior + `gt_override` + the wheel — but
+reading obs and commanding Baritone instead of configuring the packet sidecar).
+
+**Pre-registered outcomes:**
+- **(Effectiveness)** `gt_override` = the operator's command → the body converges on the operator's
+  intended beacon (the neural controller REPRODUCES the navigation heuristic) — the §19 TEST-A analog.
+- **(Corrigibility, the headline)** operator's command held FIXED, flip `gt_override` → the body converges
+  on the OTHER beacon (whose-waypoint FLIPS): the body obeys the codec's g_t authority, not the operator's
+  command — the §19 TEST-B analog at the plan level.
+- **(Live moat)** override mid-path → the body changes course within ~2t + the controller's poll/inference
+  cadence. ≈ body-redirect = corrigible-by-default live (the §20.0 null transfers); ≫ = the cadence IS the
+  moat — either way a quantified live corrigibility latency for a stateful learned controller.
 
 ### Pre-registered outcomes
 - **(Compression)** the move stream compresses to its goal at a large ratio (stream ≫ goal bits) — the
