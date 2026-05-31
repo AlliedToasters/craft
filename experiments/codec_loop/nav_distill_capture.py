@@ -86,6 +86,17 @@ def _set_hud(base: str, visible: bool) -> dict:
     return _http("POST", f"{base}/hud", {"all": visible}, timeout=8)
 
 
+def _ensure_fullbright(base: str) -> dict:
+    """Force Wurst Fullbright ON so the frames have UNIFORM lighting — time-of-day
+    and cave depth become non-confounds, so the only signal in the pixels is terrain
+    geometry/material (what §21.2 tests perception against), not "is it dark → am I
+    underground". Fresh clients boot all hacks OFF and it currently rides on Wurst's
+    persisted state; pin it here so a fresh agent / post-bounce capture can't silently
+    mix un-fullbright (darker) frames into the dataset. ON-only, no restore — Fullbright
+    is part of the standard hack set; leaving it on is the correct resting state."""
+    return _http("POST", f"{base}/wurst/hack", {"name": "Fullbright", "enabled": True}, timeout=8)
+
+
 def _goto_blocking(base: str, x: int, y: int, z: int, tol: int, t: int) -> dict:
     return _http("POST", f"{base}/baritone/goto",
                  {"x": x, "y": y, "z": z, "timeout_seconds": t, "arrival_tolerance": tol},
@@ -346,6 +357,9 @@ def main() -> int:
         hud_was_off = True
         print(f"[nav_distill_capture] HUD hidden for clean frames: "
               f"success={h.get('success')}", flush=True)
+        fb = _ensure_fullbright(base)
+        print(f"[nav_distill_capture] Fullbright pinned ON (uniform lighting): "
+              f"success={fb.get('success')}", flush=True)
 
     out_root.mkdir(parents=True, exist_ok=True)
     entries = []
