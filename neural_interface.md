@@ -2760,7 +2760,10 @@ packet recording (the move stream is §16's follower null; the neural object liv
 sunflower_plains, snowy_plains, grove), 3 long random-heading gotos each — terrain VARIETY is
 load-bearing (flat → straight path → trivial horizon by construction; the many `unreachable`/`timeout`
 legs are the forced detours we want). **23 871 usable rows.** Throttled Xvfb frames captured in parallel
-(0.5 s cadence, ~2 000 PNGs) — forward-investment for §21.2, used by nothing in §21.0.
+(0.5 s cadence, ~2 000 PNGs) — intended as forward-investment for §21.2, used by nothing in §21.0. **NB
+(§21.1 follow-up): these frames have Baritone's path overlay ON (it ships on; the capture never toggled it),
+so they are CONTAMINATED for §21.2 — the planned path is drawn at the goal = the answer on the input. §21.2
+must recapture with `/baritone/render {visible:false}` (now wired into the driver). See §21.1's NEXT note.**
 
 **Analysis (`nav_horizon.py`).** Predict Baritone's window-exit subgoal at a FIXED action radius
 `target_r` from a terrain window of SWEPT radius `feat_r` — decoupling the two is the experiment (the
@@ -2880,8 +2883,22 @@ question for the residual: the residual is detours, and detours are unmovable by
 builders verbatim), `experiments/codec_loop/nav_bearing_plot.py` (plot); `results/sprint21/bearing_ablation.json`,
 `results/sprint21/bearing_knee.png`. No substrate change, no recapture.
 
-**NEXT (§21.2).** Visual modality — predict the SAME window-exit subgoal from the captured frames instead
-of the structured floor map. §21.1 sharpens the hypothesis: pixels should help on the DETOUR subset
-specifically (richer obstacle perception at range), not on aggregate (the bearing already nails that), and
-the win is terrain-information, not heading. The frames are already banked (§21.0 forward-investment);
-still pure re-analysis until a temporal rung (§21.3) needs the sequence.
+**NEXT (§21.2).** Visual modality — predict the SAME window-exit subgoal from frames instead of the
+structured floor map. §21.1 sharpens the hypothesis: pixels should help on the DETOUR subset specifically
+(richer obstacle perception at range), not on aggregate (the bearing already nails that), and the win is
+terrain-information, not heading.
+
+**§21.2 REQUIRES A RECAPTURE — the banked §21.0 frames are CONTAMINATED (caught by the user 2026-05-31).**
+Baritone ships its in-world overlay ON (`renderPath`/`renderGoal`/`renderGoalXZBeacon`/`renderSelectionBoxes`/
+`renderSelection` all true), and the §21.0 capture never toggled it — so every banked frame has the planned
+PATH drawn as a line straight at the goal (visually confirmed: a red path line on the ground). That line IS
+the window-exit subgoal painted on the input; a vision head would OCR the answer, not perceive terrain — a
+false-positive generator for the whole "perception replaces search" thesis. The structured §21.0/§21.1
+results are UNAFFECTED (they use block_grid, not pixels) — the contamination is confined to the visual
+channel. Fix shipped: homunculus `/baritone/render {visible:false}` (BaritoneRenderHandler; pathfinder
+still runs, only visuals change) is now wired into `nav_distill_capture.py` — forced OFF whenever `--frames`,
+restored on exit, override with `--keep-overlay`. So §21.2 is a fresh JOINT capture (overlay-off frames +
+the structured sidecar, tick-aligned in one run), NOT pure re-analysis. Secondary frame-hygiene TODO: the
+Xvfb grab also caught the PrismLauncher log window in the corner — want a maximized/focused MC window (and
+optionally the `/hud` clean-recording toggle) for the recapture. The banked frames remain useful as a
+pipeline smoke-test only.

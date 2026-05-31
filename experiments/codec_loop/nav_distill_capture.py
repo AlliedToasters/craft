@@ -65,6 +65,17 @@ def _stop(base: str) -> dict:
     return _http("POST", f"{base}/baritone/stop", timeout=8)
 
 
+def _set_baritone_render(base: str, visible: bool) -> dict:
+    """Toggle Baritone's in-world overlay (path line + goal beacon + selection
+    boxes). The pathfinder still runs — only the visuals change. CRITICAL for the
+    §21.2 VISUAL rung: Baritone ships these ON, so a recorded frame has the planned
+    PATH drawn straight at the goal — the window-exit subgoal painted on the input.
+    Predicting the subgoal from such a frame is OCR of the answer, not perception of
+    terrain. We force it OFF whenever frames are captured (the structured §21.0/§21.1
+    channel is unaffected — overlay only touches pixels)."""
+    return _http("POST", f"{base}/baritone/render", {"visible": visible}, timeout=8)
+
+
 def _goto_blocking(base: str, x: int, y: int, z: int, tol: int, t: int) -> dict:
     return _http("POST", f"{base}/baritone/goto",
                  {"x": x, "y": y, "z": z, "timeout_seconds": t, "arrival_tolerance": tol},
@@ -247,6 +258,9 @@ def main() -> int:
     ap.add_argument("--leg-timeout", type=int, default=60)
     ap.add_argument("--spawn-range", type=int, default=20000,
                     help="random_spawn radius for biome variety (0 = stay put)")
+    ap.add_argument("--keep-overlay", action="store_true",
+                    help="keep Baritone's path/goal overlay ON during frame capture "
+                         "(debug only — CONTAMINATES §21.2: the path is the answer)")
     ap.add_argument("--frames", action="store_true",
                     help="grab throttled Xvfb frames (forward-investment for §21.2)")
     ap.add_argument("--frame-interval", type=float, default=0.5)
@@ -272,6 +286,16 @@ def main() -> int:
         _relay(args.relay, "difficulty peaceful")
         time.sleep(0.3)
 
+    # §21.2 confound guard: kill Baritone's path/goal/selection overlay so the
+    # recorded frames don't carry the answer (the planned path drawn at the goal).
+    # Only when actually grabbing frames; restored in the finally block.
+    render_was_off = False
+    if args.frames and not args.keep_overlay:
+        r = _set_baritone_render(base, False)
+        render_was_off = True
+        print(f"[nav_distill_capture] baritone overlay OFF for clean frames: "
+              f"renderPath={(r.get('settings') or {}).get('renderPath')}", flush=True)
+
     out_root.mkdir(parents=True, exist_ok=True)
     entries = []
     try:
@@ -296,6 +320,8 @@ def main() -> int:
                 args.leg_timeout, rng, grabber))
     finally:
         _stop(base)
+        if render_was_off:
+            _set_baritone_render(base, True)   # restore Baritone's debugging overlay
         if not args.no_peaceful:
             _relay(args.relay, "difficulty easy")
 
