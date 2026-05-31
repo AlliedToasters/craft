@@ -87,10 +87,20 @@ def _feat(c, filter_passive, prior):
     return f
 
 
-def interact_rate(prior: dict, obs: dict, entity_id) -> dict | None:
-    """Rate (bits) to entropy-code the TRUE target index under the prior, for one
-    interact. None if not applicable (no obs/entity_set, target not in set, or a
-    feature-dim mismatch). filter_passive is read from obs.policy (g_t)."""
+def interact_rate(prior: dict, obs: dict, entity_id, gt_override=None) -> dict | None:
+    """Rate (bits) to entropy-code the TRUE target index under the prior, AND the
+    prior's argmax pick (the §19.1 neural-controller decision), for one interact.
+    None if not applicable (no obs/entity_set, target not in set, or a feature-dim
+    mismatch).
+
+    filter_passive (the g_t fed to the prior) is read from obs.policy by default —
+    the wire policy, §18.2 behaviour. When ``gt_override`` is not None it OVERRIDES
+    that bit (§19.1 corrigibility decoupling): the controller is steered by the
+    codec's g_t regardless of what KillAura's own filter is doing on the wire. The
+    rate's TRUE index (``idx``) still comes from the actual wire target (what the
+    heuristic stack hit); only the prior's conditioning is overridden, so a flip in
+    ``gt_override`` flips ``argmax_*`` while ``idx`` stays put — that decoupling IS
+    the corrigibility signal."""
     if not isinstance(obs, dict) or entity_id is None:
         return None
     cands = _candidates(obs)
@@ -106,8 +116,11 @@ def interact_rate(prior: dict, obs: dict, entity_id) -> dict | None:
     idx = next((i for i, c in enumerate(cands) if c["id"] == entity_id), None)
     if idx is None:
         return None  # target not in the (vocab-filtered) entity_set — not codeable here
-    policy = obs.get("policy") or {}
-    filter_passive = bool(policy.get("Filter passive mobs", False))
+    if gt_override is not None:
+        filter_passive = bool(gt_override)
+    else:
+        policy = obs.get("policy") or {}
+        filter_passive = bool(policy.get("Filter passive mobs", False))
     X = [_feat(c, filter_passive, prior) for c in cands]
     if any(len(row) != prior["dim"] for row in X):
         return None
@@ -117,5 +130,10 @@ def interact_rate(prior: dict, obs: dict, entity_id) -> dict | None:
         rate = -logp[idx].item() / math.log(2.0)
         pred = int(logits.argmax().item())
     return {"rate_bits": rate, "idx": idx, "n_cands": len(cands),
-            "filter_passive": filter_passive, "argmax_idx": pred,
-            "argmax_correct": pred == idx}
+            "filter_passive": filter_passive, "gt_overridden": gt_override is not None,
+            "argmax_idx": pred, "argmax_correct": pred == idx,
+            # §19.1 the neural controller's decision — the id it would put on the
+            # wire, and the species behind it (so the harness can assert that
+            # flipping g_t flips passive<->hostile).
+            "argmax_id": cands[pred]["id"], "argmax_type": cands[pred]["type"],
+            "true_id": cands[idx]["id"], "true_type": cands[idx]["type"]}

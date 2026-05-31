@@ -245,6 +245,13 @@ def _set_interact_prior(cfg: dict[str, Any] | None) -> str | None:
         prior = load_prior(str(cfg["path"]))
     except Exception as e:  # noqa: BLE001 - surface load failure to the caller
         return f"{type(e).__name__}: {e}"
+    # §19.1 "neural takes the wheel": when substitute is on, the prior's argmax
+    # pick OVERWRITES the wire entity_id (lossy controller substitution, not a
+    # lossless rate read). gt_override (bool|None) decouples the g_t fed to the
+    # prior from obs.policy for the corrigibility control. Both default to the
+    # §18.2 passive observer (substitute off, read wire policy).
+    prior["substitute"] = bool(cfg.get("substitute", False))
+    prior["gt_override"] = cfg.get("gt_override")  # None | bool
     with _INTERACT_LOCK:
         _INTERACT_PRIOR = prior
         _INTERACT_RATES.clear()
@@ -260,17 +267,42 @@ def _interact_rate_stats() -> dict[str, Any]:
     def _mean(rs):
         return sum(r["rate_bits"] for r in rs) / len(rs) if rs else None
 
-    fp_on = [r for r in rates if r["filter_passive"]]
-    fp_off = [r for r in rates if not r["filter_passive"]]
+    def _acc(rs):
+        return (sum(r["argmax_correct"] for r in rs) / len(rs)) if rs else None
+
+    def _type_counts(rs, key):
+        c: dict[str, int] = {}
+        for r in rs:
+            t = r.get(key)
+            if t is not None:
+                c[t] = c.get(t, 0) + 1
+        return c
+
+    fp_on = [r for r in rates if r["filter_passive"]]   # protect_passive g_t
+    fp_off = [r for r in rates if not r["filter_passive"]]  # attack_all g_t
     return {
         "armed": prior is not None,
         "arm": prior["arm"] if prior else None,
         "path": prior["path"] if prior else None,
+        # §19.1 controller mode (substitute=neural-takes-the-wheel; gt_override=
+        # the g_t actually fed to the prior, decoupled from the wire policy).
+        "substitute": bool(prior.get("substitute")) if prior else None,
+        "gt_override": prior.get("gt_override") if prior else None,
         "n": n,
         "mean_bits": _mean(rates),
         "mean_bits_protect_passive": _mean(fp_on),
         "mean_bits_attack_all": _mean(fp_off),
-        "argmax_acc": (sum(r["argmax_correct"] for r in rates) / n) if n else None,
+        "argmax_acc": _acc(rates),
+        # agreement with the wire (heuristic) target, split by the g_t fed in —
+        # the §19.1 Test-A effectiveness signal.
+        "argmax_acc_protect_passive": _acc(fp_on),
+        "argmax_acc_attack_all": _acc(fp_off),
+        # what the NEURAL controller picked, by g_t bucket — flipping g_t should
+        # flip these passive<->hostile (the §19.1 Test-B corrigibility signal).
+        "argmax_type_protect_passive": _type_counts(fp_on, "argmax_type"),
+        "argmax_type_attack_all": _type_counts(fp_off, "argmax_type"),
+        "true_type_protect_passive": _type_counts(fp_on, "true_type"),
+        "true_type_attack_all": _type_counts(fp_off, "true_type"),
         "mean_cands": (sum(r["n_cands"] for r in rates) / n) if n else None,
     }
 
@@ -403,19 +435,28 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
     # §18.2 live g_t codec rate: score the TRUE interact target under the served
     # prior and accumulate -log2 P(true idx). Lossless / non-mutating — reads the
     # original target from `fields`; the index pointer reconstructs it exactly.
+    #
+    # §19.1 neural-takes-the-wheel: when the served prior has substitute=True, the
+    # prior's argmax pick (computed from the SAME score) overwrites the decoded
+    # entity_id below (after decode), making this a lossy controller substitution.
+    # gt_override decouples the prior's conditioning from obs.policy.
+    neural_sub_id = None
     with _INTERACT_LOCK:
         prior = _INTERACT_PRIOR
     if prior is not None and packet_id == "minecraft:interact" \
             and fields.get("action") == "ATTACK":
         try:
             from experiments.codec_loop.filter_prior import interact_rate
-            r = interact_rate(prior, obs, fields.get("entity_id"))
+            r = interact_rate(prior, obs, fields.get("entity_id"),
+                              gt_override=prior.get("gt_override"))
         except Exception as e:  # noqa: BLE001 - never let scoring break the roundtrip
             r = None
             _log.warning("interact_rate failed: %s", e)
         if r is not None:
             with _INTERACT_LOCK:
                 _INTERACT_RATES.append(r)
+            if prior.get("substitute"):
+                neural_sub_id = r["argmax_id"]
 
     try:
         decoded = decode(action, obs)
@@ -435,6 +476,18 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
         return {"ok": True, "decoded": decoded, "error": None,
                 "perturbed": True, "fidelity_ok": False}
 
+    # §19.1 neural substitution: the served prior's argmax pick replaces the wire
+    # entity_id. Unlike the entityid reparam (a lossless pointer at enough bits),
+    # this is the CONTROLLER taking the wheel — the neural decision overrides the
+    # heuristic's chosen target. When the pick == the wire target (the common case)
+    # this is behaviourally identity; when it diverges, the neural target goes out
+    # (the substitution-error / corrigibility signal). entity_id reconstructs to a
+    # real obs entity, so the substituted packet always resolves.
+    neural_sub = False
+    if neural_sub_id is not None and "entity_id" in decoded:
+        neural_sub = decoded["entity_id"] != neural_sub_id
+        decoded["entity_id"] = neural_sub_id
+
     fidelity_ok = fields_close(decoded, fields, atol=1e-6)
 
     # `ok` is the SUBSTITUTION signal homunculus gates on (CodecPassthrough.java:330):
@@ -445,13 +498,15 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
     # MUST substitute — otherwise homunculus silently passes the original through and
     # the controller runs effectively lossless (the parity curve would be a flat
     # artifact). So ok=true under lossy; true fidelity is reported as `fidelity_ok`.
-    if quantized_bits is not None or blockpos_lossy or entityid_lossy:
+    if quantized_bits is not None or blockpos_lossy or entityid_lossy or neural_sub:
         out: dict[str, Any] = {
             "ok": True, "decoded": decoded, "error": None,
             "lossy": True, "fidelity_ok": fidelity_ok, "float_bits": quantized_bits,
         }
         if eid_cfg is not None:
             out["entityid_status"] = entityid_status
+        if neural_sub:
+            out["neural_sub"] = True
     else:
         out = {"ok": fidelity_ok, "decoded": decoded,
                "error": None if fidelity_ok else "fields_close mismatch",
@@ -618,6 +673,16 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if isinstance(ip, dict) and not isinstance(ip.get("path"), str):
                 self._respond(400, {"ok": False, "error": "interact_prior.path must be a string"})
+                return
+            if isinstance(ip, dict) and "substitute" in ip \
+                    and not isinstance(ip["substitute"], bool):
+                self._respond(400, {"ok": False,
+                                    "error": "interact_prior.substitute must be a bool"})
+                return
+            if isinstance(ip, dict) and ip.get("gt_override") is not None \
+                    and not isinstance(ip["gt_override"], bool):
+                self._respond(400, {"ok": False,
+                                    "error": "interact_prior.gt_override must be a bool or null"})
                 return
             err = _set_interact_prior(ip)
             if err is not None:
