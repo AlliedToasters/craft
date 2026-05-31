@@ -42,6 +42,7 @@ from craft.codec.move import MoveAction
 from experiments.codec_loop.quantize import POS_MODES, float_bits, quantize_move
 from experiments.codec_loop.obsrel import quantize_move_obsrel
 from experiments.codec_loop.blockpos import BLOCK_REACH, ABS_RANGE, quantize_block_pos
+from experiments.codec_loop.entity import ABS_ID_RANGE, quantize_entity_id
 
 DEFAULT_PORT = 25600
 DEFAULT_HOST = "127.0.0.1"
@@ -119,6 +120,18 @@ _PERTURB_SPATIAL_ACTIONS = frozenset({
 # the Java reconstructor rebuilds a valid packet. None => block_pos lossless.
 _BLOCKPOS: dict[str, Any] | None = None
 
+# entityid: §17.2.2 lossy DISCRETE-ENTITY codec. When set, the entity_id field of
+# an InteractAction (ATTACK/INTERACT) is reparam'd between encode and decode so the
+# substituted wire packet names the reconstructed entity. Spec (all optional bar
+# bits unless mode=collapse):
+#   {"bits": 4, "mode": "index"|"collapse"|"absolute", "limit": 16, "abs_range": 2097152}
+# mode=index codes entity_id as its INDEX into obs.entity_set (~4 bits lossless over
+# limit 16); mode=collapse drops the pointer and always names entity_set[0] (nearest =
+# the §13.1 geometric argmax, ~0 bits — the "predict the decision" extreme); mode=
+# absolute quantizes the raw network int over ±abs_range (~22 bits — the foil, falls
+# back to original below that). None => entity_id lossless.
+_ENTITYID: dict[str, Any] | None = None
+
 # --- lightweight load instrumentation (fleet strain gauge) -------------------
 # Counts roundtrips and tracks concurrent in-flight requests so a sweep can read
 # /healthz and SEE whether the single shared server is the operational ceiling
@@ -160,6 +173,7 @@ def _full_snapshot() -> dict[str, Any]:
         snap["obsrel"] = _OBSREL
         snap["perturb"] = _PERTURB
         snap["blockpos"] = _BLOCKPOS
+        snap["entityid"] = _ENTITYID
         return snap
 
 
@@ -198,6 +212,12 @@ def _set_blockpos(blockpos: dict[str, Any] | None) -> None:
     global _BLOCKPOS
     with _QUANT_LOCK:
         _BLOCKPOS = blockpos
+
+
+def _set_entityid(entityid: dict[str, Any] | None) -> None:
+    global _ENTITYID
+    with _QUANT_LOCK:
+        _ENTITYID = entityid
 
 
 def _apply_perturb(packet_id: str, decoded: dict[str, Any],
@@ -302,6 +322,29 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
         blockpos_lossy = new_action is not action
         action = new_action
 
+    # §17.2.2 discrete-entity codec: reparam entity_id on InteractAction (attack /
+    # interact). Different packet family from move/block above. status distinguishes
+    # a real codec application from an obs-starvation pass-through (entity not in
+    # entity_set) — only "applied" is lossy / forces substitution.
+    entityid_lossy = False
+    entityid_status = None
+    with _QUANT_LOCK:
+        eid_cfg = _ENTITYID
+    if eid_cfg is not None:
+        try:
+            new_action, entityid_status = quantize_entity_id(
+                action, obs,
+                bits=int(eid_cfg.get("bits", 0)),
+                mode=eid_cfg.get("mode", "index"),
+                limit=int(eid_cfg.get("limit", 16)),
+                abs_range=float(eid_cfg.get("abs_range", ABS_ID_RANGE)),
+            )
+        except Exception as e:
+            return {"ok": False, "decoded": None,
+                    "error": f"entityid {type(e).__name__}: {e}"}
+        entityid_lossy = new_action is not action
+        action = new_action
+
     try:
         decoded = decode(action, obs)
     except Exception as e:
@@ -330,15 +373,21 @@ def roundtrip(packet_id: str, fields: dict[str, Any], obs: dict[str, Any]) -> di
     # MUST substitute — otherwise homunculus silently passes the original through and
     # the controller runs effectively lossless (the parity curve would be a flat
     # artifact). So ok=true under lossy; true fidelity is reported as `fidelity_ok`.
-    if quantized_bits is not None or blockpos_lossy:
+    if quantized_bits is not None or blockpos_lossy or entityid_lossy:
         out: dict[str, Any] = {
             "ok": True, "decoded": decoded, "error": None,
             "lossy": True, "fidelity_ok": fidelity_ok, "float_bits": quantized_bits,
         }
+        if eid_cfg is not None:
+            out["entityid_status"] = entityid_status
     else:
         out = {"ok": fidelity_ok, "decoded": decoded,
                "error": None if fidelity_ok else "fields_close mismatch",
                "fidelity_ok": fidelity_ok}
+        # entityid configured but NOT applied (obs-starvation / non-interact) —
+        # surface the reason so the harness can tell pass-through from a hit.
+        if eid_cfg is not None:
+            out["entityid_status"] = entityid_status
     return out
 
 
@@ -458,6 +507,29 @@ class _Handler(BaseHTTPRequestHandler):
                                             "error": f"blockpos.{k} must be a number"})
                         return
             _set_blockpos(bp)
+        if "entityid" in body:
+            eid = body["entityid"]
+            if eid is not None and not isinstance(eid, dict):
+                self._respond(400, {"ok": False, "error": "entityid must be an object or null"})
+                return
+            if isinstance(eid, dict):
+                mode = eid.get("mode", "index")
+                if mode not in ("index", "collapse", "absolute"):
+                    self._respond(400, {"ok": False,
+                                        "error": "entityid.mode must be 'index'|'collapse'|'absolute'"})
+                    return
+                # bits required unless collapse (which ignores it)
+                if mode != "collapse" and not isinstance(eid.get("bits"), int):
+                    self._respond(400, {"ok": False,
+                                        "error": "entityid.bits must be an int (except mode=collapse)"})
+                    return
+                if "limit" in eid and not isinstance(eid["limit"], int):
+                    self._respond(400, {"ok": False, "error": "entityid.limit must be an int"})
+                    return
+                if "abs_range" in eid and not isinstance(eid["abs_range"], (int, float)):
+                    self._respond(400, {"ok": False, "error": "entityid.abs_range must be a number"})
+                    return
+            _set_entityid(eid)
         snap = _full_snapshot()
         _log.info("quant config -> %s", snap)
         self._respond(200, {"ok": True, "quant": snap})

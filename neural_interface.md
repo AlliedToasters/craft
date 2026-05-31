@@ -2031,3 +2031,68 @@ the passthrough obs** (which is pose-only today, the same plumbing gap that gate
 17.2.1 confirms there is *no lossy headroom to chase here*, and points the genuine headroom at the
 obs-reconstruction codec — exactly where 17.2.2 (`entity_id`, already obs-reconstructable to 0.985
 offline) is predicted to be the first channel that pays. NEXT = the `entity_set`→obs plumbing.
+
+### 17.2.2 RESULTS — `entity_id` knee + the live "predict-the-decision" headroom (2026-05-30, live, agent0 @ (6001,100,6000))
+
+The gate first: the bounded R3 `entity_set` (nearest-first int network ids, the §13.1 candidate
+order) is now plumbed into the codec-facing obs (homunculus `PlayerObsSnapshot`, commit `d60a9f7`;
+captured tick-thread, serialized send-thread, radius 16 / limit 16). New codec:
+`experiments/codec_loop/entity.py` (`quantize_entity_id`) wired into the sidecar as an `entityid`
+config mode (`craft/codec/server.py`), three codings; driven live by
+`experiments/codec_loop/entity_decoy.py`. Metric = **whose HP drops**: attack the intended cow,
+scan all cows before/after, attribute the damage by position (NoAI/Silent cows → obs nearest-first
+== scan nearest-first). Killaura OFF. 5 trials/cell, PEACEFUL. Path: `/attack_entity` →
+`gameMode.attack` → `ServerboundInteract` → outbound mixin → passthrough → sidecar reparam → the
+server damages the **reconstructed** entity.
+
+**Phase A — index knee (confirmatory pointer reparam).** Row of 5 cows; attack the MIDDLE (idx 2,
+a non-endpoint so a coarse index actually rounds to a neighbour).
+
+| cell | coding | hit intended | hit other-real | subst | subErr |
+|---|---|---:|---:|---:|---:|
+| control | lossless identity | 5/5 | 0 | 21 | 0 |
+| index b4 | idx into `entity_set` | 5/5 | 0 | 20 | 0 |
+| **index b3** | ″ | **5/5** | 0 | 20 | 0 |
+| index b2 | ″ | 0/5 | 5 (→ neighbour cow) | 21 | 0 |
+| index b1 | ″ | 0/5 | 5 (→ nearest) | 20 | 0 |
+| absolute b24 | raw network int, ±2²¹ | 5/5 | 0 | 20 | 0 |
+| absolute b12 | ″ | 5/5 *(fallback)* | 0 | 16 | **5** |
+
+Index pointer is **lossless to b3 = ⌈log2 5⌉**, then cliffs to a *different real entity* below
+(b2 → the neighbour idx, b1 → nearest) — `subErr=0`, so these are clean substitutions onto a
+wrong-but-real target, the entity analog of the §17.2.1 block neighbour-cell miss. The absolute
+foil needs **~24 bits** (raw, unbounded, non-local int); below that the quantized id is BOGUS →
+`level.getEntity` null → reconstructor null → the substitute **falls back to the original**
+(b12: `subErr=5`, the 5 interact attempts errored and passed through — it can't even produce a
+wrong-but-real hit). So the *only* compression is the **index-into-obs pointer: ~3 bits vs ~24**
+— the §16 move-null / §17.2.1 block-pointer result carried onto the entity channel.
+
+**Phase B — collapse / decoy (THE DISCOVERY).** `collapse` drops the pointer entirely and names
+`entity_set[0]` (nearest = the §13.1 geometric argmax, ~0 index bits). T = intended, D = decoy at
+distinguishable close range.
+
+| cfg | geometry | cell | hit T | hit D (decoy) |
+|---|---|---|---:|---:|
+| B1 | T nearest | control | 5/5 | 0 |
+| B1 | T nearest | **collapse** | **5/5** | 0 |
+| B2 | D nearest, attack farther T | control | 5/5 | 0 |
+| B2 | D nearest, attack farther T | index b4 | 5/5 | 0 |
+| B2 | D nearest, attack farther T | **collapse** | 0 | **5/5** |
+
+**Headline (matches the pre-reg): the `entity_id` channel has the live headroom `block_pos` did
+not.** When intent coincides with geometry (B1, the ~98.5% case of §13.1) dropping the entire
+entity-id pointer is **free** — collapse hits T 5/5 at ~0 bits. When intent *diverges* from
+geometry (B2) the lossless pointer (control / index b4) **preserves intent** → hits T, while
+collapse **honors geometry** → diverts to the nearer decoy D 5/5. That divergence IS the §13.1
+~1.5% tail, made mechanical and visible on the wire: collapse reconstructs the attack target from
+obs alone. This is **"predict the decision, not the packet" demonstrated LIVE** — the first wire
+channel where reconstruct-from-obs genuinely pays (the block target needed a grid that isn't in
+obs; the entity target's geometry already is). Wire integrity clean throughout (`subErr=0` except
+the absolute-foil fallback, `drift=0`).
+
+**Implication for §18:** the learned discrete-decision codec has a real target HERE — a head that
+predicts the attack/interact target from the `entity_set` geometry (the §13.1 0.985 predictor)
+and transmits only the **residual** when the operator's choice departs from the argmax (the B2
+tail). The index pointer (~3 bits) is the lossless fallback; the geom-collapse (~0 bits) is the
+compressed common case; §18 learns the gate between them. §17.2 closes: two knees mapped
+(`block_pos` no headroom, `entity_id` real headroom), headroom located = where §18 wins.
