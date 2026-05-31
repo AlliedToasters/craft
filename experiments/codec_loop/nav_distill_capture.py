@@ -77,6 +77,15 @@ def _set_baritone_render(base: str, visible: bool) -> dict:
     return _http("POST", f"{base}/baritone/render", {"visible": visible}, timeout=8)
 
 
+def _set_hud(base: str, visible: bool) -> dict:
+    """Show/hide the whole vanilla HUD (health/food/air/hotbar/effects/xp/crosshair/
+    selected-item). For §21.2 frames we hide it: the HUD doesn't leak the subgoal,
+    but the model gets health/hunger/etc through the structured obs channel, not the
+    pixels, so a terrain-only frame is the honest visual input. In-memory flag, resets
+    to visible on client restart, so set per-run."""
+    return _http("POST", f"{base}/hud", {"all": visible}, timeout=8)
+
+
 def _goto_blocking(base: str, x: int, y: int, z: int, tol: int, t: int) -> dict:
     return _http("POST", f"{base}/baritone/goto",
                  {"x": x, "y": y, "z": z, "timeout_seconds": t, "arrival_tolerance": tol},
@@ -327,11 +336,16 @@ def main() -> int:
     # recorded frames don't carry the answer (the planned path drawn at the goal).
     # Only when actually grabbing frames; restored in the finally block.
     render_was_off = False
+    hud_was_off = False
     if args.frames and not args.keep_overlay:
         r = _set_baritone_render(base, False)
         render_was_off = True
         print(f"[nav_distill_capture] baritone overlay OFF for clean frames: "
               f"renderPath={(r.get('settings') or {}).get('renderPath')}", flush=True)
+        h = _set_hud(base, False)
+        hud_was_off = True
+        print(f"[nav_distill_capture] HUD hidden for clean frames: "
+              f"success={h.get('success')}", flush=True)
 
     out_root.mkdir(parents=True, exist_ok=True)
     entries = []
@@ -359,6 +373,8 @@ def main() -> int:
         _stop(base)
         if render_was_off:
             _set_baritone_render(base, True)   # restore Baritone's debugging overlay
+        if hud_was_off:
+            _set_hud(base, True)               # restore the vanilla HUD
         if not args.no_peaceful:
             _relay(args.relay, "difficulty easy")
 
