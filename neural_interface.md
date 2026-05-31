@@ -2114,11 +2114,15 @@ is the first channel where **learning pays** — the dual of §16's null.
   frozen §13.1 target head (`results/rung_a_target_ckpt`, trained with `CrossEntropyLoss` so its
   softmax is a calibrated index prior) and measure `mean -log2 P(true_idx)` on the held-out split,
   raw + temperature-calibrated, vs uniform-pointer / nearest-bet / raw-int references.
-- **18.1 — can a richer / better-fit predictor lower the rate?** The deployed checkpoint froze the
-  *final-epoch* weights (val 0.892/0.923), undershooting its own best-epoch peak (0.954/0.985, §13.1
-  metrics). 18.1 = recover the peak (early-stop capture) and test richer context (recurrent state /
-  recent action history / fuller obs) — does CE drop further? This is the "learning has something to
-  prove" test: unlike §16, accuracy gains here convert directly to bits.
+- **18.1 — modeling in-world context: the bits g_t buys (DONE, below).** Reframed from "richer
+  predictor" to the deeper point: §18.0's prior `P(target | geom, type)` is mode-BLIND. The true
+  interact/attack target is `f(geom, type, g_t)` where `g_t` = the operator's *policy* — the Wurst
+  KillAura **filter stack** (the embodiment-ladder authority interface: the neural model must faithfully
+  EXECUTE against Wurst/Baritone settings, not invent targets). frozen_combat is single-mode so the
+  prior never paid for that. 18.1 builds a MULTI-mode dataset (the same scene captured under
+  filter-on / filter-off) and measures how many bits the `g_t` policy block buys a mode-aware prior
+  over a mode-blind one. (The original "recover the best-epoch peak / recurrent context" sub-thread is
+  deferred — the in-world-context question is the load-bearing one.)
 - **18.2 — live predictive codec in the loop.** Wire the entropy-coding interact codec into the
   passthrough (reuse §17.2.2 sidecar + decoy harness): confirm lossless behavioral parity (100% by
   construction) and measure the live rate on real rollout interacts (the offline CE should transfer).
@@ -2160,5 +2164,68 @@ compression.**
 **Honesty / 18.1 hook:** the FROZEN checkpoint is the *final-epoch* weights (val 0.892/0.923), below
 §13.1's reported best-epoch peak (0.954/0.985) — the deployed artifact undershot its own accuracy, so
 0.218 bits is a conservative (achievable-today) rate; recovering the peak should push it lower. The
-estimate is also data-starved (65 val events, wide CIs). Both are 18.1's to tighten. **NEXT = 18.1**
-(recover the peak + richer predictor) then **18.2** (live predictive codec, reuse §17.2.2 harness).
+estimate is also data-starved (65 val events, wide CIs).
+
+### 18.1 RESULTS — modeling in-world context: the bits g_t buys (2026-05-30, live agent0)
+
+§18.0 measured the rate of a mode-blind prior. But the executor (Wurst KillAura) selects its target
+under a *policy* — a stack of ~26 filter toggles + `Priority`, the embodiment-ladder authority
+interface `g_t`. The same scene maps to a DIFFERENT target under a different filter; a prior that
+can't see `g_t` must pay for that ambiguity. 18.1 quantifies the payment.
+
+**Premise grounded** (`experiments/codec_loop/filter_flip.py`, live HP-drop attribution, frozen
+NoAI/knockback-resistant mobs): toggling `Filter passive mobs` flips KillAura's attack target —
+SOLO sheep → mode A(attack-passives) hits it 3/3, mode B(protect-passives) leaves it 3/3; DUEL
+sheep@dx2 + zombie@dx4 (Priority=Distance pinned) → A hits the near **sheep** 3/3, B the far
+**zombie** 3/3. Same geometry, target flips by `g_t` alone. (Findings: KillAura reach ≈ 4.25 blocks;
+default `Priority` preferred the farther hostile over the nearer passive → Priority is *also* `g_t`;
+the label is "KillAura's pick under the active policy," not "nearest.")
+
+**Dataset** (`experiments/codec_loop/filter_capture.py`): 159 matched scenes (318 rows), each a random
+passive+hostile mix at varied in-reach offsets, captured under TWO modes — `attack_all`
+(filter_passive off) and `protect_passive` (filter_passive on), `Priority=Distance` pinned. Label =
+KillAura's observed pick. **51.6% of scenes flip** (label differs across modes). Two substrate quirks
+debugged en route, both real: (1) **knockback** — `NoAI` doesn't stop it, so KillAura's first hit
+shoves the priority mob and it sprays the scene; pinned with `knockback_resistance=1`. (2) a
+**stale-filter first swing** — KillAura gets one swing under the *previous* filter before the new one
+settles (~1 tick), which was biasing the discard toward exactly the flip scenarios; fixed by a settle
+delay + rejecting non-attackable first-swings. Final dataset: 0 artifacts, 0 forced discards.
+
+**Measurement** (`experiments/codec_loop/filter_bits.py`): per-candidate scorer (the §13.1
+architecture), four feature arms, cross-entropy = codec rate (bits/interact), scene-split with a
+held-out temperature-calibration split, seed-averaged (5). The `policy` feature is the broadcast
+`filter_passive` bit — it helps ONLY via a learned `type×filter` interaction (an additive constant
+cancels in the candidate softmax), so `+policy` tests whether the codec *discovers* the policy;
+`+attackable` (= `1 − is_passive·filter`) hands it directly = the ceiling.
+
+| arm | val_bits | val_acc | flip_bits | flip_acc |
+|---|---|---|---|---|
+| geom | 1.636 | 0.423 | 1.857 | 0.342 |
+| geom+type (mode-blind) | 1.484 | 0.572 | 2.009 | 0.458 |
+| **geom+type+policy** (mode-aware) | **1.049** | **0.692** | 1.082 | 0.711 |
+| geom+type+attackable (oracle) | 1.031 | 0.708 | 1.093 | 0.753 |
+
+**HEADLINE — STRUCTURAL (training-free, exact): `I(target ; g_t | scene) = 0.516 bits/interact`**
+(flip_rate 0.52). The executor is deterministic, so `g_t` carries exactly the target-information that
+identical `geom+type` features cannot — = mean per-scene target entropy across modes = flip_rate × 1
+bit. This is a property of the matched-pair data, robust to any model.
+
+**Learned-codec corroboration:** the trained `+policy` prior (1.049 bits) lands within **0.018 bits of
+the attackable oracle** (1.031) — the MLP *discovered* the `type×filter` interaction from the raw
+broadcast bit, without being handed `attackable`. The learned mode-blind→mode-aware gap is **+0.435
+bits** on all val (recovering ~84% of the 0.516 structural MI; the shortfall is geometry-generalization
+noise common to both arms) and **+0.927 bits on flipped scenes** (≈1 bit: the mode-blind prior must
+coin-flip the contested pick; flip_acc 0.46→0.71). Type alone (mode-blind) only moves the rate
+1.64→1.48 — it cannot resolve the flip, because the flip is about *policy*, not type.
+
+**So:** on the discrete-target channel, modeling in-world context — the operator's filter policy —
+buys ~0.52 bits/interact, and a learned codec recovers it to the oracle ceiling. This is §15's
+"`g_t`-content is load-bearing" finding rendered as compression on §18's channel, and the dual of
+§18.0 on a new axis: there *learning* was the compression; here *context* is. The codec MUST carry
+`g_t` — which is what 18.2 needs live.
+
+**NEXT — 18.2 live:** the offline dataset stamped `g_t` harness-side (no jar change). For the LIVE
+codec to read `g_t` off the wire, plumb `obs.policy` (the KillAura filter toggles + Priority, via
+`Wurst.settingToJson` — the consistent homunculus↔Wurst API, never settings.json parsing) into
+`PlayerObsSnapshot.toJson`, then wire the entropy-coding interact codec into the §17.2.2 passthrough
+and confirm lossless parity. (Fleet caveat: only agent0 has the fresh entity_set jar.)
