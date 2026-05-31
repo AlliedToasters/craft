@@ -2643,3 +2643,102 @@ the goal-codec + gt_override goal, drive Baritone to a neural-inferred waypoint,
 whose-waypoint-the-body-converges-on analog of §19's whose-HP-drops) is the gated
 follow-on. Drivers: `goto_override_capture.py`, `goto_codec_measure.py`;
 data results/sprint20/{completion,override}/, results/sprint20/measure.json.
+
+---
+
+## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (SCOPED)
+
+§20 cut Baritone into a three-layer rate tower (goal → A* planner → path → follower → move
+stream) and located the neural real estate: NOT the planner (don't relearn A* — it's the
+substrate's expensive gift over an intractable world-graph search), NOT the follower (§16's
+per-tick null), but the **goal/intent layer**. §20.1a served the goal as a control-layer wheel
+and proved live corrigibility (whose-waypoint flips 5/5; moat = decision cadence, not body
+inertia). §21 climbs from *selecting* a goal to *producing* navigation behavior — but only the
+**local, tractable piece** of the planner, distilled from Baritone within the agent's action
+envelope.
+
+### North star (so the bootstrap can be checked against it)
+A **temporal world model** that navigates against rich (eventually visual) input, where what
+Baritone supplies explicitly today becomes EMERGENT PERCEPTION:
+- "look out → that's the tree, head there" — distant-goal inference (destination unnamed, perceived).
+- "see water ahead → bias toward shore" — obstacle perception + global re-bias, learned not searched.
+- target-ID (which entity to go to / hit) is the SAME perceptual act at range — so this thread and
+  the §18 entity-target thread CONVERGE in the world model.
+
+The deep substitution: **perception replaces search.** Baritone's A* *is* a perfect structured
+world-model-plus-planner; the mature model *looks* and infers what A* computes. So Baritone is not
+replaced piecemeal — it is the TEACHER, and the arc weans the model off its explicit signals.
+
+### The design invariant that keeps every rung in service of the north star
+**Fix the prediction target; migrate the input source from oracle → perception.**
+- **Target (frozen across the whole arc):** Baritone's optimal **window-exit subgoal** — where the
+  planned path crosses radius r — as a distribution over local boundary cells. Same head, rung 1
+  through the mature model. (Local action = move-to-subgoal; break/place fold in later as in-radius
+  actions. r≈5–6 is doubly natural: the local-planning horizon AND the strike/use action-affordance
+  radius — the affordance radius IS the horizon over which local planning is actionable.)
+- **Conditioning, factored so global signals are removable + replaceable:**
+  - `local terrain` — rung 1: structured `block_grid` (r-windowed); later: rendered frames (same target).
+  - `goal signal` — rung 1: explicit bearing (oracle); later: ablated, then INFERRED from perception
+    ("see the tree" = recover the bearing from the scene).
+- **Capture once, ablate many.** The rung-1 capture records EVERYTHING later rungs need — full planned
+  path, bearing, block_grid, AND frames, AND the time sequence — though rung 1 consumes only
+  terrain+bearing. Rungs 2–4 become pure re-analysis, no re-capture.
+
+The trick in one line: the bootstrap is "heavy-handed" *because* it hands the model the oracle bearing
+and clean voxels; each later rung REMOVES one oracle crutch while holding the target fixed, until the
+model reproduces A*'s local decision from raw input alone — at which point Baritone is pure fallback.
+
+### The rung arc (migration of the conditioning source)
+| Rung | Terrain input | Goal input | Proves | Status |
+|------|---------------|------------|--------|--------|
+| **§21.0** (next) | structured `block_grid` (r-windowed) | explicit bearing | the HORIZON CURVE — local-r distillation works; how far must you see? | bootstrap |
+| §21.1 | structured | **ablated** | which goals are scene-inferable vs need the oracle (salient vs arbitrary) | sketch |
+| §21.2 | **frames (visual)** | inferred | predict the SAME subgoal from pixels — first real world-model step ("see water → shore") | sketch |
+| §21.3+ | visual + **temporal** | perceived | extended horizon via lookahead, distant-goal inference, anticipation | north star |
+
+Orthogonal **serve-live** thread (the "take the wheel" lineage): once a rung predicts well offline,
+serve it live with Baritone as the GLOBAL-REPLAN FALLBACK — the corrigible-local (re-reads the bearing
+every window, like §19's memoryless feedforward) + inert-global (Baritone replans only when local gets
+stuck, the §20 path-state inertia) hybrid. Gated per rung; never the first deliverable.
+
+### §21.0 — tight scope for next session
+1. **Substrate add (one piece):** expose Baritone's planned path per tick —
+   `pathingBehavior.getCurrent().getPath().positions()` → `baritone_state`. Bounded, exactly analogous
+   to the §17.2.2 `entity_set` plumbing. `block_grid` + `goal` already recorded.
+2. **Capture:** drive Baritone to long random goals over VARIED terrain (hills/water/caves — flat makes
+   r=1 trivial and teaches nothing; we WANT the non-locality). Record path + bearing + block_grid +
+   **frames + the sequence** (the forward-investment for §21.1–3). Reuse the `goto_override_capture`
+   driver pattern.
+3. **Deliverable — the HORIZON CURVE (one experiment, three readings):** window-exit-subgoal prediction
+   accuracy vs receptive radius r (sweep r=1…10), held-out terrain. It reads simultaneously as
+   (a) the NAVIGATION HORIZON (at what r does local prediction saturate?), (b) the local-policy
+   DISTILLATION accuracy, (c) the PATH-CODEC RESIDUAL — which RESOLVES §20.0's open caveat: it splits
+   the overclaimed 437× into "compressible without A*" (where local prediction succeeds) vs
+   "irreducibly global" (the residual = what perception must later supply).
+4. **Pre-registered question:** does local r≈5 cover the common case (residual small; A* earns its keep
+   only on rare long-horizon detours)? The residual-at-r≈5 IS the size of the job handed to perception —
+   it sets the agenda for §21.1–3.
+
+### Scope guards (explicitly NOT §21.0)
+Visual modality (§21.2), bearing ablation (§21.1), serve-live, break/place actions (start move-only),
+distant-goal inference, temporal prediction. All deferred — the capture is built so none need a
+re-capture.
+
+### Open design questions to settle at the TOP of next session (so it doesn't stall)
+1. **Subgoal representation** — boundary-cell classification vs (heading + Δy + a "goal-inside-window"
+   flag)? Lean boundary-cell; pin before capturing.
+2. **Bearing encoding** — unit vector / sin-cos + distance bucket + "goal beyond window" flag (the
+   minimal global signal we MUST feed, else we penalize the model for not knowing which way an arbitrary
+   far goal is — not a local-planning failure).
+3. **Terrain-variety capture recipe** — random long gotos seeded into mixed biomes; guarantee
+   water/cliff/cave coverage.
+4. **Frame capture in §21.0: yes/no** — lean yes (cheap insurance for §21.2); confirm.
+5. **r-sweep range** — block_grid is r=10 today; sweep 1…10 or widen the grid first.
+
+Supersedes the old §20.1b (train a nav goal-prior): §21 reframes the neural object from *selecting*
+a substrate-provided goal to *producing* the local plan — the richer rung. Related: §20 (the rate-tower
+cut + path-state corrigibility this builds on), §16 (the follower null below this), §18/§19 (the
+"predict the decision" head reused for the subgoal; entity-target-ID converges with nav-target-ID in
+the world model), [[project_embodiment_design]] (recurrence/corrigibility boundary; perception replacing
+search is the maturation of the substrate-as-load-bearing thesis), [[reference_headless_observability]]
+(the frame-grab the visual rungs need).
