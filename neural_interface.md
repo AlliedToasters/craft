@@ -2096,3 +2096,69 @@ and transmits only the **residual** when the operator's choice departs from the 
 tail). The index pointer (~3 bits) is the lossless fallback; the geom-collapse (~0 bits) is the
 compressed common case; §18 learns the gate between them. §17.2 closes: two knees mapped
 (`block_pos` no headroom, `entity_id` real headroom), headroom located = where §18 wins.
+
+## §18 — The learned discrete-decision codec (the neural interface)
+
+This is the chapter the doc is named for. §16 found the move stream's compressibility IS the
+deterministic obs-relative reparam (learning null, ≤0.27 b/pkt). §17.2.1 found `block_pos` has no
+lossy headroom (the obs-pointer is lossless, nothing below it without a block grid not in obs).
+§17.2.2 found `entity_id` DOES have headroom: the attack target is reconstructable from the obs
+`entity_set` geometry — a learned predictor hits it where the trivial "nearest" prior does not.
+§18 cashes that headroom as **a lossless predictive codec**: entropy-code the interact-target index
+under a learned prior `P(idx | obs geometry)`. The achieved rate of such a coder is exactly the
+prior's **cross-entropy** on the true index, `mean -log2 P(true_idx)`; behavioral parity is 100%
+by construction (the coder always recovers the true index), so the entire result is the RATE. This
+is the first channel where **learning pays** — the dual of §16's null.
+
+- **18.0 — the prior's cross-entropy = the codec rate (offline baseline).** DONE (below). Read the
+  frozen §13.1 target head (`results/rung_a_target_ckpt`, trained with `CrossEntropyLoss` so its
+  softmax is a calibrated index prior) and measure `mean -log2 P(true_idx)` on the held-out split,
+  raw + temperature-calibrated, vs uniform-pointer / nearest-bet / raw-int references.
+- **18.1 — can a richer / better-fit predictor lower the rate?** The deployed checkpoint froze the
+  *final-epoch* weights (val 0.892/0.923), undershooting its own best-epoch peak (0.954/0.985, §13.1
+  metrics). 18.1 = recover the peak (early-stop capture) and test richer context (recurrent state /
+  recent action history / fuller obs) — does CE drop further? This is the "learning has something to
+  prove" test: unlike §16, accuracy gains here convert directly to bits.
+- **18.2 — live predictive codec in the loop.** Wire the entropy-coding interact codec into the
+  passthrough (reuse §17.2.2 sidecar + decoy harness): confirm lossless behavioral parity (100% by
+  construction) and measure the live rate on real rollout interacts (the offline CE should transfer).
+
+### Pre-registered outcomes
+- The learned prior's calibrated CE ≪ uniform `log2(n)` ≪ raw `~24` → the learned predictive codec
+  compresses the interact channel by ≫10× over the §17.2.2 lossless pointer, losslessly.
+- It also ≪ the nearest-bet baseline → the compression is from LEARNING the non-trivial target
+  function, not geometric triviality (nearest acc ~0.48). If instead CE ≈ nearest-bet, the head adds
+  nothing over "guess nearest" and §18 collapses back to §17.2.2's trivial prior (a clean null).
+- Entity type buys bits (geom+type CE < geom CE) → type is load-bearing for who you attack.
+
+### 18.0 RESULTS — learned interact-target prior as a codec (2026-05-30, offline, frozen §13.1 ckpt)
+
+`experiments/next_packet/rung_a_target_entropy.py`. Reuses the §13.1 feature pipeline
+(`load_attacks`/`cand_features`) and reproduces the checkpoint's split EXACTLY (seed 42, val_frac
+0.25 → the same held-out 65 of 260 combat ATTACK events). Rate = `mean -log2 softmax(scores)[true]`;
+temperature fit on val (the 200-epoch/195-sample head is overconfident, so calibration is the honest
+codec rate). Avg candidates/event = **49.7** (dense combat `entity_set`).
+
+| prior | val acc | bits/interact (val) | note |
+|---|---:|---:|---|
+| raw network id | — | **24.00** | the §17.2.2 absolute foil (no obs) |
+| uniform pointer `log2(n)` | — | **5.49** | the §17.2.2 lossless pointer floor |
+| nearest-bet (lossless) | 0.48 | **3.85** | "guess nearest, send residual" — the trivial geom prior |
+| §13.1 **geom** (CE) | 0.892 | 0.458 raw → **0.376** calibrated (T=1.81) | learned, geometry only |
+| §13.1 **geom+type** (CE) | 0.923 | 0.286 raw → **0.218** calibrated (T=2.11) | learned, geometry + type |
+
+**Headline: the learned prior compresses the interact target to ~0.22 bits/interact (calibrated,
+held-out) — ~25× under the lossless `log2(n)`≈5.5 pointer and ~110× under the 24-bit raw id, while
+staying LOSSLESS.** 77% of events cost <0.1 bits (the confident-correct common case is ~free); the
+rate lives almost entirely in the rare-miss tail (p95 ≈ 1.9 bits). It beats the trivial nearest-bet
+(3.85 bits) by ~18× — **the compression is LEARNING the non-trivial target function**, not geometric
+triviality (nearest is right only 48%). Type features buy ~0.16 bits over geom-only (0.218 vs 0.376)
+→ entity type is load-bearing for the attack decision. This is the result §16 (move null) and
+§17.2.1 (block no-headroom) could not produce: **on the discrete-entity channel, learning is the
+compression.**
+
+**Honesty / 18.1 hook:** the FROZEN checkpoint is the *final-epoch* weights (val 0.892/0.923), below
+§13.1's reported best-epoch peak (0.954/0.985) — the deployed artifact undershot its own accuracy, so
+0.218 bits is a conservative (achievable-today) rate; recovering the peak should push it lower. The
+estimate is also data-starved (65 val events, wide CIs). Both are 18.1's to tighten. **NEXT = 18.1**
+(recover the peak + richer predictor) then **18.2** (live predictive codec, reuse §17.2.2 harness).
