@@ -2646,7 +2646,7 @@ data results/sprint20/{completion,override}/, results/sprint20/measure.json.
 
 ---
 
-## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (§21.0 DONE)
+## §21 — Local-r navigation distillation: bootstrap toward a world-model navigator (§21.0, §21.1 DONE)
 
 §20 cut Baritone into a three-layer rate tower (goal → A* planner → path → follower → move
 stream) and located the neural real estate: NOT the planner (don't relearn A* — it's the
@@ -2818,3 +2818,70 @@ heightmap gave an unreadable, overfit curve):
 `experiments/codec_loop/nav_horizon.py` (analysis), `experiments/codec_loop/nav_horizon_plot.py` (plot);
 `results/sprint21/capture/` (12 rollouts, sidecars + frames), `results/sprint21/sweeps/` (target_r×seed
 JSONs), `results/sprint21/horizon.png`. Homunculus: `BaritoneState.java` `path_fwd`/`path_idx`.
+
+### §21.1 RESULTS — the bearing-precision knee is FLAT (DONE, verified)
+
+**Question (set by §21.0 finding #3).** The ~0.87 detour residual — is it a *missing-goal-signal* problem
+(the head can't recover detours because it doesn't know the goal direction precisely enough) or a
+*missing-terrain-information* problem (local structured terrain genuinely lacks the detour cause)? §21.1
+is the bearing ablation that decides it, and it's PURE RE-ANALYSIS of the §21.0 capture — no recapture
+(the capture-once-ablate-many design paying off as promised).
+
+**Mechanism (`nav_bearing_ablation.py`).** §21.0's head sees terrain in a frame ROTATED so +forward
+points at the goal, and predicts the subgoal as a DEVIATION from the true bearing. We ablate by aligning
+that frame to the bearing QUANTIZED to k sectors while the TARGET stays the deviation from the TRUE
+bearing — so the quantization error θ_true−θ_q ∈ [−π/k, π/k] is exactly the irreducible noise of "knowing
+the goal direction only to resolution 2π/k". Sweep exact → 45° (k=8) → 90° (k=4) → 180° (k=2) → none
+(k=1, world frame = the full ablation). The bearing-free gvec [log-dist, beyond-window] stays constant
+across all arms, so only direction precision varies. Held out by rollout; 5 seeds; feat_r=6, target_r=5.
+
+**Result — the knee is FLAT (`results/sprint21/bearing_knee.png`).** Detour-subset recovery is invariant
+to bearing precision across the entire sweep:
+
+| precision | detour ±1 | aggregate ±1 | CE (bits) |
+|---|---|---|---|
+| exact | 0.122 ± 0.010 | 0.686 | 5.23 |
+| 45° | 0.149 ± 0.005 | 0.693 | 4.69 |
+| 90° | 0.109 ± 0.010 | 0.672 | 5.04 |
+| 180° | 0.109 ± 0.016 | 0.646 | 5.37 |
+| none (k=1) | 0.122 ± 0.021 | 0.669 | 4.88 |
+| bearing-only (terrain ablated) | **0.000** | 0.762 | 3.12 |
+
+The **bearing-dependent gap (exact − none) = 0.000 ± ~0.02** — coarsening the goal direction to *nothing*
+leaves detour recovery unchanged (the 0.109–0.149 spread is seed-noise with no monotone trend). So:
+
+1. **The bearing's entire job is the bearing-trivial majority.** `bearing_only` (exact bearing, terrain
+   ablated) scores **0.000** on detours and exactly the straight-line floor (0.762) on aggregate — it
+   learns the constant "aim at the goal" and nothing else. A detour is BY DEFINITION a departure from the
+   bearing, so the bearing carries zero detour information. Confirmed by construction and empirically.
+
+2. **The §21.0 residual is NOT a goal-signal problem.** Detour recovery (~0.12) comes entirely from
+   terrain and is the same whether the goal direction is known exactly or not at all. Knowing the goal
+   more precisely does not unlock detours; the structured local terrain (floor/block/water within the
+   action envelope) simply lacks the detour cause. **This redirects the §21.2 agenda**: vision's value is
+   NOT bearing recovery ("see the tree → recover the heading" is cheap — even a 180°-coarse heading
+   suffices), it is richer/farther TERRAIN perception — seeing the obstacle or global routing cue that the
+   r=6 floor map cannot contain. The "look out, see the water ahead, bias toward shore" half of the north
+   star is the load-bearing one; the "recover the bearing" half is nearly free.
+
+3. **The local head barely pays for itself on aggregate.** Every terrain arm (~0.65–0.69 aggregate) sits
+   *below* the always-straight baseline (0.762): the head trades straight-tick accuracy for marginal
+   detour recovery (~12% of 24% = ~3% of ticks) that doesn't net out positive on the bulk metric. The
+   detour subset is the only place local terrain earns its keep, and even there weakly — reinforcing
+   §21.0 finding #1 (most local nav is bearing-trivial) and #3 (the residual is large and global).
+
+**A methodological note.** This ablation keeps the relative-deviation TARGET (which presupposes the true
+bearing to *define* what counts as a detour) and ablates only the INPUT frame's bearing alignment — so it
+measures "does goal-direction precision help the head recover detours", not "could a bearing-blind agent
+navigate at all" (it could not — without a goal it doesn't know which way to go). That is the right
+question for the residual: the residual is detours, and detours are unmovable by goal precision.
+
+**Artifacts.** `experiments/codec_loop/nav_bearing_ablation.py` (analysis, reuses `nav_horizon`'s feature
+builders verbatim), `experiments/codec_loop/nav_bearing_plot.py` (plot); `results/sprint21/bearing_ablation.json`,
+`results/sprint21/bearing_knee.png`. No substrate change, no recapture.
+
+**NEXT (§21.2).** Visual modality — predict the SAME window-exit subgoal from the captured frames instead
+of the structured floor map. §21.1 sharpens the hypothesis: pixels should help on the DETOUR subset
+specifically (richer obstacle perception at range), not on aggregate (the bearing already nails that), and
+the win is terrain-information, not heading. The frames are already banked (§21.0 forward-investment);
+still pure re-analysis until a temporal rung (§21.3) needs the sequence.
