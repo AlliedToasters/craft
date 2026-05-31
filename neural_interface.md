@@ -2389,3 +2389,88 @@ model (Wurst still originates every swing + owns attack timing; neural only sele
 
 §19 done & verified. NEXT (later rung): time re-enters when the target is a STATEFUL heuristic
 (Baritone path/goal commitment, the §12.3/§13.2 seam) — the temporal codec, not this one.
+
+## §20 — The stateful rung: predict the PLAN, not the packet stream (SCOPED)
+
+§18/§19 conquered the **memoryless** heuristic (KillAura): a same-tick, g_t-parameterized discrete
+decision. The codec learned the decision (§18), then MADE it and stayed corrigible (§19). But §19's
+corrigibility was *trivially* free: a feedforward controller re-reads g_t every tick, so it has no
+state to diverge — it cannot slip authority. §20 climbs to the **stateful** heuristic (Baritone), where
+the controller COMMITS to a goal and does not re-derive it each tick. Two things become non-trivial at
+once, and they are the same thing:
+
+1. **Compression (the codec).** §16 closed the per-tick MOVE packet (no learned headroom — a
+   deterministic obs-relative reparam; a β-VAE buys ≤0.27b, §16.2 NULL). But §16 compressed each packet
+   *in isolation*. Baritone emits thousands of move packets that are a deterministic function of ONE
+   committed goal + current pos + terrain. The move **stream** therefore compresses to its generating
+   **goal** — the temporal analog of §18's "predict the decision, not the packet," now at the PLAN
+   level: **predict the plan, not the packet stream.** Headline = stream-bits / goal-bits (thousands of
+   §16-obsrel move packets → one `GoalBlock` ≈ a few ints, or an index into a small waypoint set).
+2. **Corrigibility (now a real result).** A committed controller CAN ride its old plan when the operator
+   changes g_t mid-commitment. The latency before its goal updates = the corrigibility moat. §12.3/§13.2
+   already built this instrument (per-rollout segment decoder on embodied/move features; the
+   `rel = p_new/(p_old+p_new)` handover-latency crossover) and measured the **completion** seam (goal
+   done → next) at ~6.4 ticks / 0.32s with NO interior moat decay. But §13.2.4 EXPLICITLY DEFERRED the
+   corrigibility-relevant seam: peaceful data has only completions, "Override is the corrigibility-
+   relevant seam (§6); a non-peaceful recapture is a next-sprint input." **That deferred override seam IS
+   §20's headline test.** The moat = override-handover-latency − completion-handover-latency = how much
+   longer a committed plan resists an operator INTERRUPT than it takes to roll over a natural completion.
+
+### Why now / time dependency
+This is where same-tick feedforward becomes insufficient and recurrence earns its keep. The move packet
+at tick t is a function of (committed goal, current pos, terrain) — the goal is LATENT and PERSISTENT
+across ticks, so a per-tick reader can't recover it from one packet; it needs the stream. KillAura was
+memoryless (the §19 rung); Baritone carries state (this rung). The "take the wheel" verb is identical
+to §19, only the decision is now a GOAL, not a target, and it persists.
+
+### Substrate — already present, no new homunculus code for the offline tranche
+- **Ground-truth goal is recorded per-tick.** `BaritoneState` (`/obs/sidecar`, `TickSidecarRecorder`)
+  emits `goal` (`pathingBehavior.getGoal().toString()`), `pathing`, `goal_active`, and the driving
+  process, one row/tick joined to the packet recording. So goal LABELS are free — read, don't infer.
+- **Override is drivable.** `/baritone/goto` (`customGoalProcess.setGoalAndPath(GoalBlock)`) + re-issue
+  mid-path = a clean, fully-controlled FORCED override seam (no waiting on organic hostile interrupts).
+  `/baritone/stop` cancels. (Organic §6 interrupt — evasion/water_aversion cancelling Baritone — is a
+  secondary, optional capture.)
+- **Decoder + latency instrument exist.** `rung_c_moat.{load_rollout,segments,featurize}` +
+  `rung_c_transition` (rel-crossover). Reuse verbatim so inputs match the validated NO-moat-decay result.
+
+### §20.0 (offline) — the goal codec + the OVERRIDE-seam moat  [PRIMARY DELIVERABLE]
+1. **Capture** move-streams with goal transitions INCLUDING forced overrides: drive `/baritone/goto A`,
+   then mid-path `/baritone/goto B`; arm packet recording + obs sidecar; per-tick rows = {MoveAction
+   fields, `baritone_state.goal` ground truth, pos, obs}. Mix completion seams (let A finish → goto C)
+   and override seams (interrupt A with B) so the two are A/B-comparable on one capture.
+2. **Compression headline:** stream-bits (Σ §16-obsrel MoveAction bits over a segment) vs goal-bits
+   (code the goal as a `GoalBlock` delta or an index into the rollout's waypoint set). The goal-level
+   headroom §16 never measured.
+3. **Override-seam moat (THE HEADLINE):** run the §13.2 rel-crossover on OVERRIDE transitions; compare
+   handover latency to the §13.2 COMPLETION latency (~6.4t). The gap = the corrigibility moat.
+
+### §20.1 (live) — neural takes the wheel on navigation  [FOLLOW-ON, gated on §20.0]
+The §19 analog: serve the goal-codec; "take the wheel" = drive Baritone toward the NEURAL-inferred goal,
+with a `gt_override` that forces a goal decoupled from the operator's actual command. Corrigibility LIVE:
+override the goal mid-path, measure ticks-until-the-body-changes-course (the moat as a live property of
+the learned controller) — the navigation analog of §19's whose-HP-drops is whose-waypoint-the-body-
+converges-on.
+
+### Pre-registered outcomes
+- **(Compression)** the move stream compresses to its goal at a large ratio (stream ≫ goal bits) — the
+  plan-level headroom exists, parallel to §18's discrete headroom and unlike §16's per-tick null.
+- **(Moat / corrigibility, the headline)** override-handover-latency ≥ completion-latency. STRICTLY
+  greater = a committed plan carries real interruption inertia (a measurable corrigibility moat, the
+  recurrence/corrigibility boundary made quantitative). ≈ completion = no extra commitment inertia
+  (corrigible-by-default even when stateful) — an equally publishable, thesis-relevant null.
+- **(Informative failure)** if the goal is NOT recoverable from the move stream (decoder at chance), the
+  plan is not legible from the body alone — surface it; do not paper over.
+
+### Substrate needs
+1. `experiments/.../goto_override_capture.py`: forced-override + completion capture via `/baritone/goto`
+   + obs sidecar; per-tick {MoveAction, baritone_state.goal, pos, obs}. (No new homunculus code.)
+2. Goal-codec measurement reusing `rung_c_moat`/`rung_c_transition` (decoder + rel-crossover) + a
+   stream-vs-goal bits computation (§16 obsrel for the stream side).
+3. §20.1 live take-the-wheel: a served goal-codec + a `gt_override` goal + a live override-latency
+   harness (gated on §20.0).
+
+Related: [[project_embodiment_design]] (recurrence = corrigibility boundary; g_t authority interface),
+the §12.3 NO-moat-decay + §13.2 ~6.4t completion-handover results (this rung's direct ancestors),
+§16 move-codec null (the per-tick floor this rung clears at the plan level), §18/§19 (the discrete
+"predict the decision" the navigation channel now mirrors at the plan level).
