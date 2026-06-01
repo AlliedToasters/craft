@@ -19,6 +19,22 @@ two-tier Placer fix:
     (placed at the dirt's old coord). Tier-2 needs Baritone to break an
     adjacent block, so reachability is the genuine risk this scenario probes.
 
+  - **tunnel** (escape-check, the underground `no_space` fix): player standing
+    in a 1-wide × 2-tall corridor, both ends open. Only ~2/8 ring-1 tiles are
+    open (forward + back), so the legacy blanket RING_1_OPEN_MIN gate trips
+    `no_space` *before searching*. Post-fix (per-candidate escape-check) places
+    a block 2 cells down the open corridor — the placement leaves both ring-1
+    exits open, so it's allowed (placed at feet-Y, |dx|∈{1,2} along the
+    corridor). This is the #2 wall-clock sink the diamond waves exposed.
+
+  - **pocket** (escape-check GUARDRAIL — refusal expected): player in a bedrock
+    box with exactly ONE open ring-1 exit (sturdy floor, non-clearable walls so
+    Tier-2 make-room can't dig out). The only candidate is that exit cell, and
+    placing there seals the player in — escape-check must REFUSE with `no_space`.
+    This is the inverse of `tunnel`: it proves the fix still protects against
+    true encasement instead of just rubber-stamping every cramped placement.
+    Pass = outcome is a `no_space` failure (nothing was placed).
+
 Pass criteria per iter (for the chosen scenario):
   - outcome does NOT start with FAILED
   - a placed_at coord is parsed and matches the scenario's expected cell
@@ -26,6 +42,7 @@ Pass criteria per iter (for the chosen scenario):
 
 Run:  python -m e2e.test_place_constrained --scenario slope --iters 3
       python -m e2e.test_place_constrained --scenario make_room --iters 3
+      python -m e2e.test_place_constrained --scenario tunnel --iters 3
       python -m e2e.test_place_constrained --scenario all --iters 2
 """
 
@@ -55,7 +72,11 @@ DEFAULT_ITEM = "crafting_table"
 DEFAULT_TIMEOUT_S = 40.0
 DEFAULT_PASS_RATE = 0.9
 
-SCENARIOS = ("slope", "make_room")
+SCENARIOS = ("slope", "make_room", "tunnel", "pocket")
+
+# Scenarios where PASS means /place correctly REFUSED (no encasement), keyed to
+# the expected failure-reason token in the outcome string.
+REFUSAL_SCENARIOS = {"pocket": "no_space"}
 
 
 def _c(s: str) -> None:
@@ -92,6 +113,37 @@ def _build_make_room(anchor: tuple[int, int, int]) -> None:
     time.sleep(0.3)
 
 
+def _build_tunnel(anchor: tuple[int, int, int]) -> None:
+    """1-wide x 2-tall corridor along x, both ends open. Walls/floor/ceiling
+    solid; only forward/back (ring-1 along x) are open -> blanket gate trips
+    no_space pre-fix; escape-check places down the open corridor post-fix."""
+    ax, ay, az = anchor
+    _clear_volume(ax, ay, az)
+    _c(f"fill {ax-3} {ay-1} {az} {ax+3} {ay-1} {az} minecraft:stone")      # floor
+    _c(f"fill {ax-3} {ay}   {az-1} {ax+3} {ay+1} {az-1} minecraft:stone")  # north wall
+    _c(f"fill {ax-3} {ay}   {az+1} {ax+3} {ay+1} {az+1} minecraft:stone")  # south wall
+    _c(f"fill {ax-3} {ay+2} {az} {ax+3} {ay+2} {az} minecraft:stone")      # ceiling
+    time.sleep(0.3)
+
+
+def _build_pocket(anchor: tuple[int, int, int]) -> None:
+    """Bedrock box, exactly one open ring-1 exit (east). Non-clearable walls
+    block Tier-2 make-room, so escape-check must refuse the only candidate."""
+    ax, ay, az = anchor
+    _clear_volume(ax, ay, az)
+    # Solid 3x2x3 bedrock around the player, then carve player cell + east exit.
+    _c(f"fill {ax-1} {ay} {az-1} {ax+1} {ay+1} {az+1} minecraft:bedrock")
+    _c(f"setblock {ax} {ay}   {az} minecraft:air")          # player feet
+    _c(f"setblock {ax} {ay+1} {az} minecraft:air")          # player head
+    _c(f"setblock {ax+1} {ay}   {az} minecraft:air")        # east exit feet
+    _c(f"setblock {ax+1} {ay+1} {az} minecraft:air")        # east exit head
+    _c(f"setblock {ax}   {ay-1} {az} minecraft:bedrock")    # player floor
+    _c(f"setblock {ax+1} {ay-1} {az} minecraft:bedrock")    # exit floor (sturdy)
+    _c(f"setblock {ax}   {ay+2} {az} minecraft:bedrock")    # ceiling over player
+    _c(f"setblock {ax+1} {ay+2} {az} minecraft:bedrock")    # ceiling over exit
+    time.sleep(0.3)
+
+
 def _extract_placed_at(outcome: str) -> tuple[int, int, int] | None:
     m = re.search(r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\]", outcome)
     if m:
@@ -119,6 +171,10 @@ def run_iter(rec: dict, *, scenario: str, item: str, timeout_s: float, verbose: 
         _build_slope(ANCHOR)
     elif scenario == "make_room":
         _build_make_room(ANCHOR)
+    elif scenario == "tunnel":
+        _build_tunnel(ANCHOR)
+    elif scenario == "pocket":
+        _build_pocket(ANCHOR)
     else:
         rec["passed"] = False
         rec["fail_reason"] = f"unknown_scenario:{scenario}"
@@ -159,6 +215,32 @@ def run_iter(rec: dict, *, scenario: str, item: str, timeout_s: float, verbose: 
     is_failed = outcome is None or outcome.startswith("FAILED")
     has_placed = placed_at is not None
 
+    # Refusal scenarios (e.g. pocket): PASS = /place correctly refused with the
+    # expected reason and placed nothing. This is the escape-check guardrail —
+    # the fix must NOT seal the player into a true 1-exit pocket.
+    if scenario in REFUSAL_SCENARIOS:
+        token = REFUSAL_SCENARIOS[scenario]
+        refused_ok = is_failed and (not has_placed) and token in (outcome or "")
+        within_budget = elapsed <= timeout_s
+        cmd(f"clear {PLAYER_NAME}")
+        cmd("kill @e[type=item,distance=..32]")
+        rec["checks"] = {
+            "refused_with_reason": refused_ok,
+            "nothing_placed": not has_placed,
+            "within_timeout": within_budget,
+        }
+        rec["passed"] = refused_ok and within_budget
+        if not rec["passed"]:
+            if has_placed:
+                rec["fail_reason"] = f"placed_when_should_refuse (at {placed_at})"
+            elif not is_failed:
+                rec["fail_reason"] = "did_not_fail"
+            elif token not in (outcome or ""):
+                rec["fail_reason"] = f"wrong_reason (want {token})"
+            else:
+                rec["fail_reason"] = "timeout"
+        return
+
     # Expected cell per scenario.
     expected_ok = False
     if placed_at is not None:
@@ -169,6 +251,9 @@ def run_iter(rec: dict, *, scenario: str, item: str, timeout_s: float, verbose: 
         elif scenario == "make_room":
             # The cleared dirt cell, at feet-Y.
             expected_ok = (px, py, pz) == (ax + 1, ay, az)
+        elif scenario == "tunnel":
+            # Anywhere in the open corridor at feet-Y (1-2 cells along x).
+            expected_ok = (py == ay) and (pz == az) and (abs(px - ax) in (1, 2))
         rec["expected_cell_ok"] = expected_ok
         # Cleanup the placed block.
         _c(f"setblock {px} {py} {pz} minecraft:air")
