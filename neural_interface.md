@@ -2964,7 +2964,7 @@ but the horizontal-routing residual is where search still earns its keep.
 `scripts/sprint21_visual_capture.sh` (concurrent capture); `results/sprint21_visual/visual.json` + `.png`;
 homunculus `TickSidecarRecorder` yaw/pitch add (redundant — `entity_set` already had it).
 
-## §22 — The path-state navigation codec: predict the PLAN's residual, not perception (§22 Rung 1 DONE)
+## §22 — The path-state navigation codec: predict the PLAN's residual, not perception (§22 Rung 1 + Rung 2 DONE)
 
 §21 closed a clean negative *from the perception side*: local terrain (§21.0), bearing precision
 (§21.1), and pixels (§21.2) cannot predict the navigation detour — the only learnable local signal
@@ -3026,3 +3026,76 @@ quantifies the global-A*-inversion bound at the plan layer (the §21 negative, n
 
 **Artifacts.** `experiments/codec_loop/path_codec.py` (analysis), `path_codec_plot.py` (plot);
 `results/sprint22/rung1.json` + `rung1.png`. No new capture, no homunculus change.
+
+### §22 Rung 2 RESULTS — the recompute is timing-predictable but content-irreducible → transmit the goal (DONE, verified)
+
+The hinge: can a decoder anticipate the recompute from plan-state ALONE — no terrain, no
+re-running A*? `path_codec_rung2.py`, same capture, three parts answering three sub-residuals.
+
+**PART A — TIMING is mostly free.** A tiny classifier predicts "a segment recompute occurs within
+the next 10 ticks" from causal plan-state (nodes-ahead, frac-consumed, segment length, run-age,
+Baritone's own `ticks_to_goal` ETA, distances to dest/goal). By-rollout split, 21 801 test ticks,
+base rate 3.4 %:
+
+| predictor | AUC |
+|---|---|
+| chance | 0.500 |
+| nodes-ahead only | 0.779 |
+| **full plan-state** | **0.901** |
+
+The recompute *event* is fairly anticipated — and it's a **distributed** plan-state signal, not a
+trivial clock or a single ETA readout: drop-any-one-feature stays ≥0.88, `ticks_to_goal` alone is
+useless (0.499), `run_age` alone only 0.66. (My Rung-1 probe mistook "no single clean threshold"
+for "unpredictable" — the *combination* of plan-state geometry predicts the WHEN.) So timing
+carries little residual.
+
+**PART B — CONTENT direction is not in plan-state.** The new segment's heading deviation from the
+straight-to-goal bearing (16-way, §21-locked), in bits:
+
+| predictor | bits/recompute |
+|---|---|
+| goal-anchor (predict straight-at-goal) | 1.334 |
+| predictive-coding (continue old heading) | 1.464 (**worse**) |
+| plan-state conditional (H(dev \| nodes-ahead bin)) | 1.144 (−0.19, partly small-sample bias) |
+
+Predictive-coding is *worse* than the goal-anchor — recomputes re-aim at the goal, they don't
+continue the prior segment. Plan-state conditioning shaves only ~0.19 b (and that's partly bin
+estimation bias on 284 events). Decisively, the **detour direction is un-learnable here**: 16 detour
+recomputes across 7 rollouts, **9 of them in a single rollout** (a13r0) — ~6 independent episodes —
+and the detour is terrain-caused (the §21 negative). The content the codec would need is exactly
+what perception couldn't supply in §21; it's A*'s output, not a plan-state function.
+
+**PART C — VERDICT: the residual collapses to the GOAL/intent stream.** The recompute is the
+planner's deterministic-given-goal output. Per the spine's thesis (DON'T relearn A* — §20: the
+planner is the substrate's expensive gift), the principled codec lets Baritone *regenerate* segments
+and transmits only the GOAL. The residual ladder (bits/tick):
+
+```
+raw sector/tick   4.0
+recompute-marginal  0.0057   (Rung 1: send a heading per recompute)
+goal-only           0.00112  (A* decoder: send only operator re-commands)
+```
+
+Goal-changes are **0.11 %/tick — 3.8× sparser than recomputes** (74 vs 284 events), and each is a
+*real operator decision* (the §19/§20.1a override surface), not a planner artifact. So §21's negative
+becomes §22's positive: **you can't predict the detour from perception (§21) or from plan-state
+(§22 Rung 2) — so don't. Transmit the goal; let A* regenerate the path.** This is the navigation
+instance of §18's "predict the decision, not the packet": the decision is the goal; everything
+downstream is the substrate's deterministic gift.
+
+**Honest scope.** Timing AUC can flatter on a 3.4 % positive rate (it's well above the single-feature
+baseline regardless). The −0.19 b content gain is partly small-sample bin bias. Detours are too few
+to learn direction — but that's the *point* (they're terrain/A*, not plan-state). The one claim
+deferred to LIVE Phase B: **A* determinism** — that re-running Baritone's planner from a captured
+`(pos, goal)` reproduces the committed segment, so recomputes truly cost 0 under a re-running decoder.
+Rung 2 establishes this should hold (recomputes re-aim at the goal, content not plan-state-explained);
+Phase B is where it's verified on the wire.
+
+**Phase B (live, next).** Serve the predicted heading/goal as the wheel; operator override = the goal
+residual; corrigibility flip — the §20.1a control-layer wheel, now grounded in the Rung-1/2 residual
+decomposition (transmit goal, A* decodes). Gated on a fresh-jar agent (entity_set/obs plumbing is
+agent0-only; see fleet caveat).
+
+**Artifacts.** `experiments/codec_loop/path_codec_rung2.py` (analysis), `path_codec_rung2_plot.py`
+(plot); `results/sprint22/rung2.json` + `rung2.png`. Re-analysis only; `load_rollouts` gained a
+`ttg` field. No new capture, no homunculus change.

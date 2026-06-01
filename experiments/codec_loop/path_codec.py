@@ -108,6 +108,7 @@ def load_rollouts(capture_dir: Path):
                         "idx": bs.get("path_idx", 0),
                         "plen": bs.get("path_len", len(fwd)),
                         "goal": goal,
+                        "ttg": bs.get("ticks_to_goal"),
                     })
         except (EOFError, OSError, gzip.BadGzipFile):
             pass            # truncated tail of an in-flight rollout — keep clean prefix
