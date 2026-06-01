@@ -57,18 +57,23 @@ def analyze(result_dir: str) -> None:
           f"exec={exec_wall:.0f}s ({100*exec_wall/total_wall:.0f}%)  "
           f"ctx={ctx_wall:.0f}s ({100*ctx_wall/total_wall:.0f}%)")
 
-    # Per (tool, pass/fail).
-    agg: dict[tuple[str, str], list[float]] = defaultdict(list)
+    # Per (tool, pass/fail), with the plan(think)/exec/ctx split folded in.
+    agg: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for s in steps:
         key = (s["tool"], "FAIL" if _is_failed(s.get("outcome", "")) else "ok")
-        agg[key].append(s.get("total_s", 0.0))
+        agg[key].append(s)
 
-    print(f"\n  {'tool':22s} {'res':4s} {'n':>4s} {'sum_s':>8s} {'mean_s':>7s} {'%wall':>6s}")
-    rows = sorted(agg.items(), key=lambda kv: -sum(kv[1]))
-    for (tool, res), vals in rows:
-        ssum = sum(vals)
-        print(f"  {tool:22s} {res:4s} {len(vals):>4d} {ssum:>8.0f} "
-              f"{ssum/len(vals):>7.1f} {100*ssum/total_wall:>5.1f}%")
+    print(f"\n  {'tool':22s} {'res':4s} {'n':>4s} {'sum_s':>8s} {'mean_s':>7s} "
+          f"{'%wall':>6s} {'think_s':>8s} {'exec_s':>8s} {'ctx_s':>7s}")
+    rows = sorted(agg.items(), key=lambda kv: -sum(x.get("total_s", 0.0) for x in kv[1]))
+    for (tool, res), ss in rows:
+        ssum = sum(x.get("total_s", 0.0) for x in ss)
+        think = sum(x.get("plan_s", 0.0) for x in ss)
+        ex = sum(x.get("exec_s", 0.0) for x in ss)
+        cx = sum(x.get("ctx_s", 0.0) for x in ss)
+        print(f"  {tool:22s} {res:4s} {len(ss):>4d} {ssum:>8.0f} "
+              f"{ssum/len(ss):>7.1f} {100*ssum/total_wall:>5.1f}% "
+              f"{think:>8.0f} {ex:>8.0f} {cx:>7.0f}")
 
     # Mining focus.
     print("\n  -- MINING (the watchdog headline) --")
