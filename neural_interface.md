@@ -2963,3 +2963,66 @@ but the horizontal-routing residual is where search still earns its keep.
 **Artifacts.** `experiments/codec_loop/nav_visual.py` (analysis), `nav_visual_plot.py` (plot),
 `scripts/sprint21_visual_capture.sh` (concurrent capture); `results/sprint21_visual/visual.json` + `.png`;
 homunculus `TickSidecarRecorder` yaw/pitch add (redundant — `entity_set` already had it).
+
+## §22 — The path-state navigation codec: predict the PLAN's residual, not perception (§22 Rung 1 DONE)
+
+§21 closed a clean negative *from the perception side*: local terrain (§21.0), bearing precision
+(§21.1), and pixels (§21.2) cannot predict the navigation detour — the only learnable local signal
+was a **leak of Baritone's own heading** (a plan readout). §22 turns that around and asks the dual
+question on the PLAN side, back in the spine's frame ("predict the decision, transmit the residual" —
+§18/§19/§20.0): how cheaply does the controller's plan-state encode its near-future, and **where do
+the irreducible bits live?** This is a pivot off the §21 rung-wall and back onto the codec/override
+spine, carrying the one insight §21 surfaced: *the plan-state is the sufficient statistic for the
+agent's near-future decisions* (the §20.0 "Baritone commits in path state" result, re-derived from
+the perception side).
+
+The structural fact (verified on the §21 capture, no recapture): Baritone paths in bounded SEGMENTS.
+`path_dest` is a segment endpoint ~16-30 blocks ahead of a far `goal`; the agent walks the committed
+`path_fwd` node list and re-invokes A* for a NEW segment only near the segment's end. So between
+recomputes the stream is index-coded ≈ free (the §20.0 mechanism); **all the residual bits live at the
+recomputes** — the navigation analog of §18's "operator departs the argmax".
+
+### §22 Rung 1 RESULTS — locate + size the residual (DONE, verified)
+
+Pure re-analysis on the `results/sprint21_visual/capture` (38 rollouts, **66 055** pathing ticks, 17
+biomes). `path_codec.py` segments each rollout's plan-state stream into commit-runs by `path_dest`
+change (goal-changes counted separately as operator re-commands), then measures the codec residual.
+
+| metric | value | reading |
+|---|---|---|
+| **mean commit-run** | **167 ticks** (pooled), 191 (rollout-balanced), median 110, max 1202 | one transmitted event reproduces ~167 ticks = §20.0 commit-length factor, real nav data |
+| **recompute rate** | 284 recomputes = **0.43 %/tick** (+ 74 operator goal-changes) | the residual is sparse |
+| **within-run free-ness** | **0.996** committed-future coverage (n=65 659) | within a run, later `path_fwd` nodes ⊆ run-start set → pure consumption, ≈ 0 bits (index coding *empirically validated*, not asserted) |
+| **detour fraction** | **5.6 %** of recomputes are >1 sector off goal; mean 0.34 sectors off; mean Δlen +10.3 nodes | 94 % of recomputes are benign extensions straight at the goal |
+| **residual bits** | 1.33 b/recompute (marginal) × 0.0043 = **0.0057 b/tick** vs 4 b/tick raw = **697×** | marginal UPPER bound; Rung 2 conditions on plan-state to lower it |
+
+**Three readings (`results/sprint22/rung1.png`):**
+
+1. **The stream compresses ~167× and the within-run cost is ≈ 0 — measured, not assumed.** 0.996
+   committed-future coverage means once a segment is transmitted, every subsequent tick in the run is the
+   player deterministically consuming already-sent nodes. This is the §20.0 "37–437× commit-length"
+   compression landing at ~167× on real multi-biome navigation, *with* the index-coding premise verified
+   directly.
+
+2. **The residual is sparse AND mostly benign.** 99.57 % of ticks carry no new plan information; of the
+   0.43 % that are recomputes, 94 % are aligned extensions (the segment just grows +10 nodes straight
+   toward the goal). Genuine detour *origination* is **5.6 % of recomputes ≈ 0.024 % of ticks** — a
+   handful of events (16 in the whole capture).
+
+3. **This relocates §21's detour and explains why perception leaked via heading.** §21's per-tick
+   "detour" (≈15 % of ticks, uncrackable from perception) is the *consumption* of curvature that was
+   **committed at a sparse recompute and then walked for free** (the 0.996 freeness). Perception
+   "predicted" detours only via the heading because the heading reads a committed curve whose decision
+   was made earlier, at a recompute, using global A*. So the detour *cause* localizes to a tiny set of
+   recompute events — exactly Rung 2's target.
+
+**What Rung 1 settles, and the Rung 2 hinge.** The codec's amortised cost is bounded by the recompute
+residual (marginal 0.0057 b/tick). The whole question of whether the path-state codec is near-lossless
+cheap — or whether the recompute carries irreducible global-search information — reduces to: **is the
+recompute (especially the 5.6 % detour-origination) predictable from plan-state at the preceding tick?**
+If yes → the residual collapses below the marginal bound, the plan is its own sufficient statistic, and
+the live wheel (Phase B) is well-founded. If no → the recompute *is* the new information, and that
+quantifies the global-A*-inversion bound at the plan layer (the §21 negative, now priced in bits).
+
+**Artifacts.** `experiments/codec_loop/path_codec.py` (analysis), `path_codec_plot.py` (plot);
+`results/sprint22/rung1.json` + `rung1.png`. No new capture, no homunculus change.
