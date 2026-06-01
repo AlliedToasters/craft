@@ -67,7 +67,11 @@ COAL_TYPES = [
 
 # Reasons that mean "this candidate isn't here; try the next one".
 # Everything else (interrupted, timeout, busy, transport, …) stops the cycle.
-SKIP_REASONS = {"unreachable", "never_started"}
+# "no_progress" = homunculus's mine watchdog tripped: the target is present in
+# loaded chunks (so scan_nearest ranked it) but Baritone can't path to it and
+# was oscillating — bail fast and try the next species instead of burning the
+# full per-candidate deadline.
+SKIP_REASONS = {"unreachable", "never_started", "no_progress"}
 SUCCESS_REASONS = {"have_target", "already_satisfied"}
 
 # Total wall-clock budget per candidate. Homunculus splits this into a short
