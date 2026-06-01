@@ -1538,7 +1538,7 @@ def _throwaway_policy(item: str, count: int) -> tuple[bool, list[str] | None, bo
     return (True, permitted, True)
 
 
-def _count_inventory_items(item_ids: set[str]) -> int | None:
+def _count_inventory_items(item_ids: "frozenset[str] | set[str]") -> int | None:
     """Sum counts of inventory items matching any of `item_ids`.
 
     Returns None on inventory-read failure so callers can distinguish
@@ -1705,12 +1705,58 @@ def handle_mine_stone(args: dict) -> str:
                               fair_miner=tunnel_for_stone)
 
 
+# Tier-gate (Fix C, 2026-06-01). Ore drops require a minimum pickaxe tier or the
+# mine yields NOTHING: the block breaks, no item drops, inventory never advances,
+# and the mine burns out as no_progress/unreachable. The 2026-06-01 diamond wave
+# exposed qwen calling mine_diamond 26× across 8 rollouts that NEVER reached iron
+# tier — every call doomed. M1-iron milestone gate is inert, so steer at the tool
+# boundary: refuse + redirect to the prerequisite instead of dispatching a doomed
+# mine. env CRAFT_MINE_TIER_GATE (default on; 0/false/no disables for A/B).
+_PICKAXES_STONE_PLUS = frozenset({
+    "minecraft:stone_pickaxe", "minecraft:iron_pickaxe",
+    "minecraft:diamond_pickaxe", "minecraft:netherite_pickaxe",
+})
+_PICKAXES_IRON_PLUS = frozenset({
+    "minecraft:iron_pickaxe", "minecraft:diamond_pickaxe",
+    "minecraft:netherite_pickaxe",
+})
+
+
+def _mine_tier_gate(label: str, required: frozenset[str], redirect: str) -> str | None:
+    """Return a refusal+redirect string if the agent lacks a sufficient pickaxe
+    for `label`, else None (proceed). Fail-open on an inventory-read blip so a
+    transport hiccup never blocks a legitimate mine."""
+    if os.environ.get("CRAFT_MINE_TIER_GATE", "1").lower() in ("0", "false", "no"):
+        return None
+    held = _count_inventory_items(required)
+    if held is None or held > 0:
+        return None
+    print(f"  [{label}] tier-gate: no required pickaxe in inventory → redirect", flush=True)
+    return f"SKIPPED {label}: {redirect}"
+
+
 def handle_mine_iron(args: dict) -> str:
+    gate = _mine_tier_gate(
+        "mine_iron", _PICKAXES_STONE_PLUS,
+        "iron ore needs a STONE-tier (or better) pickaxe to drop raw_iron — "
+        "mining it with a wooden pickaxe just breaks the block for nothing. "
+        "Craft a stone_pickaxe first (mine_stone → craft(stone_pickaxe)), then mine_iron.",
+    )
+    if gate is not None:
+        return gate
     return _handle_mine_delta("mine_iron", args, IRON_DROPS, mine_any_iron,
                               fair_miner=tunnel_for_iron)
 
 
 def handle_mine_diamond(args: dict) -> str:
+    gate = _mine_tier_gate(
+        "mine_diamond", _PICKAXES_IRON_PLUS,
+        "diamond ore needs an IRON-tier (or better) pickaxe to drop a diamond — "
+        "mining it with stone/wood just breaks the block for nothing. Get iron "
+        "first (mine_iron → smelt raw_iron → craft(iron_pickaxe)), then mine_diamond.",
+    )
+    if gate is not None:
+        return gate
     return _handle_mine_delta("mine_diamond", args, DIAMOND_DROPS, mine_any_diamond,
                               fair_miner=tunnel_for_diamond)
 

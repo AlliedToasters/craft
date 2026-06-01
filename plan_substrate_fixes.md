@@ -129,7 +129,21 @@ agents for tape ([[feedback_video_debugging]]).
 
 ---
 
-## Fix C — Tier-gate at mine_diamond/mine_iron (NEXT FIX; noted, not built)
+## Fix C — Tier-gate at mine_diamond/mine_iron — DONE & validated (2026-06-01)
+
+**SHIPPED.** `craft/tools.py`: `_mine_tier_gate` pre-check on `handle_mine_iron`
+(needs stone+ pickaxe) and `handle_mine_diamond` (needs iron+ pickaxe). When the
+required pickaxe is absent it returns `SKIPPED <tool>: <redirect>` instead of
+dispatching a doomed mine; fail-open on an inventory-read blip. env
+`CRAFT_MINE_TIER_GATE` (default on; 0/false/no disables). Unit tests:
+`tests/test_mine_tier_gate.py` (8/8, incl. the stone-satisfies-iron-not-diamond
+boundary + kill-switch + fail-open). Live agent0: wooden→both SKIP, stone→diamond
+still SKIP, gate-off→mine_diamond dispatches & fails no_progress (the doomed mine
+the gate prevents). 395 mine/tool specs green.
+
+(original scoping below)
+
+## Fix C — Tier-gate at mine_diamond/mine_iron (scoping)
 
 **The real qwen deep-mine residual.** The Fix-A wave exposed that qwen calls
 `mine_diamond` (26×) and `mine_iron` without ever holding the required pickaxe
