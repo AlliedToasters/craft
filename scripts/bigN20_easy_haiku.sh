@@ -30,6 +30,7 @@ DIFFICULTY="${CRAFT_DIFFICULTY:-easy}"
 SPAWN_RANGE="${CRAFT_SPAWN_RANGE:-20000}"
 PHASE="${CRAFT_PHASE:-dawn}"
 N_AGENTS="${N_AGENTS:-20}"
+START_AGENT="${START_AGENT:-0}"
 
 # Scout stays on qwen — same substrate as the daily driver.
 export CRAFT_SCOUT_FANOUT_MODEL="$QWEN"
@@ -96,7 +97,7 @@ run_one() {
     echo "[$(date '+%H:%M:%S')] agent${n} ended turns=${turns_run} dur=${dur}s died=${died} m1_fires=${m1} m2_fires=${m2}${cause:+ cause=$cause}" | tee -a "$INDEX"
 }
 
-for n in $(seq 0 $((N_AGENTS - 1))); do
+for n in $(seq "$START_AGENT" $((START_AGENT + N_AGENTS - 1))); do
     run_one "$n" &
 done
 
