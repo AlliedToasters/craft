@@ -141,6 +141,32 @@ boundary + kill-switch + fail-open). Live agent0: wooden→both SKIP, stone→di
 still SKIP, gate-off→mine_diamond dispatches & fails no_progress (the doomed mine
 the gate prevents). 395 mine/tool specs green.
 
+**MEASURED (2026-06-01).** Fix-C-OFF `...-133310` vs Fix-C-ON `...-153840`
+(peaceful goal=diamond N=8 qwen, dawn-pinned, 45 turns):
+
+| metric | OFF (133310) | ON (153840) |
+|---|---|---|
+| `mine_diamond` FAIL per-call | 41.0s (n=12, sum 493s, 10.6% wall) | **2.2s** (n=3, sum 7s, 0.2%) |
+| `mine_iron` FAIL per-call | 19.6s (n=4) | **0** (n=0) |
+| reached iron-pickaxe tier | 0/7 | **4/8** |
+| `mine_diamond` success | 0/12 | **9/12** |
+| DIAMONDS | 0/7 (0%) | **3/8 (38%)** |
+| deaths | 0 | 0 |
+
+- **Doomed-call wall collapsed** (confound-robust per-call mean): the doomed mine
+  now returns an instant SKIP-redirect instead of burning 12–45s.
+- **Mechanism PROVEN (not spawn luck):** gate fired 8×; 6/6 resolved fires
+  FOLLOWED the redirect to the prerequisite. agent0 chain: t9 mine_iron SKIP → t10
+  craft stone_pickaxe → t12 mine_iron → t30 iron_pickaxe → t32 mine_diamond
+  SUCCEEDS. agent5/7 show the 2-level cascade (diamond gated → iron gated → craft).
+  This is the steering the inert M1-iron milestone never gave.
+- **CAVEAT:** the 0→38% diamond lift is N=8 + random-spawn-confounded; robust
+  claims = the per-call wall collapse + redirect-followed mechanism. Larger N to
+  tighten.
+- **NEW residual (not Fix C):** collect_smelt furnace-unreachable tail — agent0
+  burned its last 13 turns on `couldn't path to the furnace` AFTER the diamond.
+  Future candidate: furnace-relocate / re-place reflex.
+
 (original scoping below)
 
 ## Fix C — Tier-gate at mine_diamond/mine_iron (scoping)
