@@ -499,6 +499,7 @@ def tunnel_for_stone(quantity: int) -> "str | None":
 
     deadline = time.monotonic() + _STONE_OVERALL_TIMEOUT
     last = before
+    last_y = py          # lowest Y reached so far — real descent down the staircase
     stuck = 0
     for i in range(1, _STONE_STAIR_MAX_STEPS + 1):
         remaining_time = deadline - time.monotonic()
@@ -519,33 +520,41 @@ def tunnel_for_stone(quantity: int) -> "str | None":
             print(f"  [stone] step {i} blocked at y={cy}: {why} — stopping staircase",
                   flush=True)
             break
-        data = _excavate_box(cx, cy, cz, cx, cy + 1, cz,
-                             timeout_seconds=int(min(remaining_time, 20.0)))
-        # "Cleared anything?" — distinguishes dirt (cleared, no cobble drop) from
-        # baritone being stuck/unreachable (nothing cleared). Lets the staircase
-        # punch through the dry dirt cap without a premature stop.
-        vol = data.get("volume")
-        rem = data.get("remaining")
-        if isinstance(vol, (int, float)) and isinstance(rem, (int, float)):
-            cleared = rem < vol
-        else:
-            cleared = bool(data.get("success"))
-
+        _excavate_box(cx, cy, cz, cx, cy + 1, cz,
+                      timeout_seconds=int(min(remaining_time, 20.0)))
+        # Real-progress guard (issue #10). Baritone's own box accounting
+        # (volume/remaining → "cleared") is unreliable: on a partial-break→reset
+        # loop it reports the box cleared even though no block actually broke, so
+        # a "cleared"-keyed guard never fires and the call burns the full 150s
+        # while the pickaxe wears out with zero descent (the agent9 stalemate).
+        # Key the stuck-streak on REAL progress instead — inventory gain OR the
+        # player genuinely descending the staircase — mirroring tunnel_for's
+        # inventory-delta bail. Descent is what still lets the staircase punch
+        # through the dirt cap (no cobble drop there, but the player does move
+        # down) without a premature stop.
         after = _count_drops(drops)
         if after is None:
             after = last
-        print(f"  [stone] step {i}: y={cy} cleared={cleared} count={after}/{target}", flush=True)
+        try:
+            cur = requests.get(f"{HOMUNCULUS_BASE}/position", timeout=5.0).json()
+            cur_y = int(cur["y"])
+        except (requests.RequestException, ValueError, KeyError):
+            cur_y = last_y
+        progressed = (after > last) or (cur_y < last_y)
+        print(f"  [stone] step {i}: y={cy} player_y={cur_y} progressed={progressed} "
+              f"count={after}/{target}", flush=True)
         if after >= target:
             return "tunnel"
-        if cleared:
+        if progressed:
             stuck = 0
         else:
             stuck += 1
             if stuck >= _STONE_STUCK_LIMIT:
-                print(f"  [stone] {stuck} steps cleared nothing; baritone stuck — stopping",
-                      flush=True)
+                print(f"  [stone] {stuck} steps with no real progress "
+                      f"(no drops, no descent) — stopping", flush=True)
                 break
         last = after
+        last_y = min(last_y, cur_y)
 
     final = _count_drops(drops)
     if final is None:
