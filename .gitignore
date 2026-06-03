@@ -27,3 +27,12 @@ toolsbackup.py
 # Local Claude Code state (scheduled-tasks lock, etc.)
 .claude/
 scratchpad/
+
+# Fleet boot logs (regenerated every launch)
+.fleet-boot/
+# Embedding caches (regenerated on demand)
+.gt_embed_cache/
+experiments/**/.gt_embed_cache/
+# Local scratch drafts
+scratch.txt
+.FLEET.md
