@@ -199,9 +199,43 @@ def _mine_first_reachable(
     return None
 
 
+# Salvage wood (issue #7). On wood-deficient spawns (deep caves, mineshafts,
+# post-flood, snowy peaks) there are no surface logs, but worked wood exists in
+# structures — village walls/roofs, mineshaft platforms. Only *_planks salvage
+# CLEANLY: planks ARE a usable crafting input (they drop themselves and carry
+# the #minecraft:planks tag, so crafting_table/sticks/pickaxe work directly,
+# skipping the log→plank step). Doors / fences / slabs / stairs are deliberately
+# EXCLUDED — they drop themselves with no recipe back to planks, so mining one
+# yields a dead item, not a wood input. Logs (the primary set) already catch
+# village log-pillars; salvage is the plank-only fallback for plank structures.
+SALVAGE_WOOD_TYPES = [
+    "oak_planks",
+    "birch_planks",
+    "spruce_planks",
+    "jungle_planks",
+    "acacia_planks",
+    "dark_oak_planks",
+    "mangrove_planks",
+    "cherry_planks",
+    "pale_oak_planks",
+    "bamboo_planks",
+    "crimson_planks",
+    "warped_planks",
+]
+
+
 def mine_any_log(quantity: int = 1) -> str | None:
     # Trees are surface canopy — wide horizontal, narrow vertical band.
     return _mine_first_reachable(quantity, LOG_TYPES, probe_radius=64, probe_y_radius=8)
+
+
+def mine_any_salvage_wood(quantity: int = 1) -> str | None:
+    # Structure planks: village walls/roofs, mineshaft platforms. Wide
+    # horizontal AND deep vertical band — a mineshaft sits y20-50 below a cave
+    # spawn, so y_radius is generous unlike the surface-canopy log probe.
+    return _mine_first_reachable(
+        quantity, SALVAGE_WOOD_TYPES, probe_radius=64, probe_y_radius=32
+    )
 
 
 def mine_any_stone(quantity: int = 1) -> str | None:

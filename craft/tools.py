@@ -15,12 +15,14 @@ import requests
 
 from craft.mine import (
     LOG_TYPES,
+    SALVAGE_WOOD_TYPES,
     _DIR_VEC,
     _yaw_to_direction,
     mine_any_coal,
     mine_any_diamond,
     mine_any_iron,
     mine_any_log,
+    mine_any_salvage_wood,
     mine_any_stone,
     tunnel_for_coal,
     tunnel_for_diamond,
@@ -40,6 +42,9 @@ SURFACE_MAX_PER_CALL = 40
 # Items whose inventory counts are summed to track mining progress.
 # mine_wood/mine_stone use delta semantics: target = current_count + requested.
 LOG_DROPS = {f"minecraft:{lt}" for lt in LOG_TYPES}
+# Salvage planks (issue #7) — counted as their own delta set when mine_wood
+# falls back to structure planks on a wood-deficient spawn.
+SALVAGE_WOOD_DROPS = {f"minecraft:{t}" for t in SALVAGE_WOOD_TYPES}
 STONE_DROPS = {"minecraft:cobblestone", "minecraft:cobbled_deepslate"}
 IRON_DROPS = {"minecraft:raw_iron"}
 DIAMOND_DROPS = {"minecraft:diamond"}
@@ -1685,8 +1690,29 @@ def handle_mine_wood(args: dict) -> str:
     # rate on mine_wood: any non-zero rate is substrate-induced
     # mis-modelling, not a useful capability.
     args = {**args, "fair": False}
-    return _handle_mine_delta("mine_wood", args, LOG_DROPS, mine_any_log,
-                              fair_miner=tunnel_for_logs)
+    out = _handle_mine_delta("mine_wood", args, LOG_DROPS, mine_any_log,
+                             fair_miner=tunnel_for_logs)
+    # Salvage fallback (issue #7): a wood-deficient spawn (deep cave, mineshaft,
+    # snowy peak) has no logs in scan range, but structures hold worked wood.
+    # Only planks salvage — they ARE planks, bypassing the log→plank craft step.
+    # Tried ONLY when the log cycle found nothing reachable; a partial log haul
+    # or a real tool failure is returned as-is. The salvage delta is self-
+    # contained (it reads its own before/after on the plank drop set), so the
+    # "no logs" gate ensures we never double-count or mislabel a log success.
+    if out.startswith("FAILED: no candidate reachable"):
+        salvage = _handle_mine_delta("mine_wood", args, SALVAGE_WOOD_DROPS,
+                                     mine_any_salvage_wood)
+        # Only override on real salvage progress — not a no-op "already had N"
+        # (which can't happen here since the log path already failed, but is
+        # cheap to guard) and not another FAILED.
+        if not salvage.startswith("FAILED") and not salvage.startswith("acquired 0 more"):
+            return (
+                "[wood_source=salvage] " + salvage
+                + " — no logs in range; mined structure planks (wood-deficient "
+                "spawn). Planks ARE planks: craft crafting_table / sticks / "
+                "wooden_pickaxe directly, no log→plank step needed."
+            )
+    return out
 
 
 def handle_mine_stone(args: dict) -> str:
