@@ -207,14 +207,6 @@ TOOLS = [
                         "type": "integer",
                         "description": "Number of additional raw_iron drops to mine (capped at 10).",
                     },
-                    "fair": {
-                        "type": "boolean",
-                        "description": (
-                            "If true, BLIND TUNNEL at player's current y. Descend "
-                            "to y=16-32 first; the tunnel digs forward at body level. "
-                            "Default: false (baritone chunk-scan also works for iron)."
-                        ),
-                    },
                 },
                 "required": ["quantity"],
             },
@@ -244,14 +236,6 @@ TOOLS = [
                         "type": "integer",
                         "description": "Number of additional diamonds to mine (capped at 10).",
                     },
-                    "fair": {
-                        "type": "boolean",
-                        "description": (
-                            "If true, BLIND TUNNEL at player's current y. Descend "
-                            "to y=-58 to -64 first. Default: false (chunk-scan is "
-                            "still genuinely useful for rare ores like diamond)."
-                        ),
-                    },
                 },
                 "required": ["quantity"],
             },
@@ -276,13 +260,6 @@ TOOLS = [
                     "quantity": {
                         "type": "integer",
                         "description": "Number of additional coal to mine (capped at 10).",
-                    },
-                    "fair": {
-                        "type": "boolean",
-                        "description": (
-                            "If true, BLIND TUNNEL at player's current y. Descend "
-                            "to y=40-60 first. Default: false."
-                        ),
                     },
                 },
                 "required": ["quantity"],

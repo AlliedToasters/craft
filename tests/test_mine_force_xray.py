@@ -114,6 +114,32 @@ class TestMineWoodAlwaysXray:
             "by substrate decision (see handle_mine_wood comment)."
         )
 
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["mine_wood", "mine_stone", "mine_iron", "mine_diamond", "mine_coal"],
+)
+def test_no_mine_schema_exposes_fair(tool_name):
+    """No agent-facing mine_* schema may expose the `fair` knob (issue #12).
+
+    The substrate forces `fair` per resource in the handlers (wood/iron/
+    diamond/coal → x-ray, stone → blind staircase), and CRAFT_MINE_FORCE_XRAY
+    overrides it at dispatch. The agent's choice is always discarded, so the
+    schema field is pure context bloat — and an invitation to do something we
+    then ignore. Keep it out of every mine_* schema.
+    """
+    from craft.tools import TOOLS
+
+    tool = next(
+        t for t in TOOLS
+        if t.get("function", {}).get("name") == tool_name
+    )
+    props = tool["function"]["parameters"]["properties"]
+    assert "fair" not in props, (
+        f"{tool_name} must not expose a `fair` knob — the substrate forces it; "
+        f"the agent's value is always overridden (issue #12)."
+    )
+
     def test_handle_mine_wood_clobbers_fair_true(self):
         """If something injects fair=True into mine_wood args (legacy
         replay, manual call), the handler MUST override it back to False.
