@@ -457,6 +457,22 @@ def _format_death(d: dict) -> str:
     return f"YOU DIED: {msg} (cause: {cause}). Died at ({dp[0]},{dp[1]},{dp[2]})."
 
 
+def _homunculus_reachable(timeout: float = 2.0) -> bool:
+    """True if the homunculus HTTP bridge answers at all (any status code).
+
+    Distinguishes a *dead* bridge (connection refused / timeout — the MC client
+    crashed or never loaded, so the whole rollout is a null trajectory worth
+    aborting; issue #9) from a *live* bridge returning an error payload (a
+    different bug — keep going). Only a transport-level failure counts as
+    unreachable; a 4xx/5xx still proves the process is up.
+    """
+    try:
+        requests.get(f"{HOMUNCULUS_BASE}/stats", timeout=timeout)
+        return True
+    except requests.RequestException:
+        return False
+
+
 def _fetch_stats() -> str | None:
     """Fetch /stats and render a compact one-liner for the LLM context.
 
@@ -1405,10 +1421,62 @@ def run(
     # artifact we keep going, if it's persistent we stop after 2 attempts.
     EMPTY_RETRIES = 1
 
+    # Early-abort guard (issue #9). When the homunculus bridge dies mid-rollout
+    # (client crash, MC disconnect, prismlauncher zombie), every tool call
+    # returns transport_error and the loop otherwise runs all max_turns turns
+    # producing a null trajectory that pollutes population stats (flags as
+    # "T50, didn't die"). Probe liveness at the top of each turn; after K
+    # consecutive unreachable probes, emit a synthetic abort record and bail.
+    UNREACHABLE_ABORT_LIMIT = 3
+    consec_unreachable = 0
+    rollout_aborted = None  # reason string if we early-abort; else None
+
     for turn in range(1, max_turns + 1):
         turn_start = time.perf_counter()
         turn_wall_start = time.time()  # epoch anchor for post-hoc video overlay
         milestone_event = None
+
+        # Early-abort liveness probe (issue #9). Done before the LLM plan so a
+        # dead bridge wastes neither a plan nor a dispatch. A transient timeout
+        # bumps the counter but one good probe resets it, so only a sustained
+        # outage (K turns) trips the abort.
+        if not _homunculus_reachable():
+            consec_unreachable += 1
+            print(
+                f"[abort?] homunculus unreachable "
+                f"({consec_unreachable}/{UNREACHABLE_ABORT_LIMIT}) at turn {turn}",
+                flush=True,
+            )
+            if consec_unreachable >= UNREACHABLE_ABORT_LIMIT:
+                rollout_aborted = "homunculus_unreachable"
+                print(
+                    f"[abort] homunculus unreachable for {consec_unreachable} turns; "
+                    f"ending rollout at turn {turn}",
+                    flush=True,
+                )
+                if jsonl_fh is not None:
+                    jsonl_fh.write(json.dumps({
+                        "_type": "turn",
+                        "turn": turn,
+                        "t": turn_wall_start,
+                        "tool": None,
+                        "args": {},
+                        "outcome": "aborted_homunculus_unreachable",
+                        "plan_s": 0.0,
+                        "exec_s": 0.0,
+                        "ctx_s": 0.0,
+                        "total_s": round(time.perf_counter() - turn_start, 3),
+                        "died": False,
+                    }) + "\n")
+                    jsonl_fh.flush()
+                break
+            # Bridge down but not yet at the abort threshold: don't burn an LLM
+            # call on a turn that can't dispatch. Back off briefly, then retry
+            # the probe on the next loop iteration.
+            time.sleep(2.0)
+            continue
+        consec_unreachable = 0
+
         print(f"\n=== turn {turn}/{max_turns}: planning ===")
         plan_start = time.perf_counter()
         # Build the prompt by appending the *current* STATE to history. This
@@ -1817,6 +1885,7 @@ def run(
             "ended_at": time.time(),
             "video_kept": video_kept,
             "rollout_had_death": rollout_had_death,
+            "rollout_aborted": rollout_aborted,
             "plan_s_total": round(plan_s_total, 3),
             "plan_s_mean": round(mean_plan, 3),
             "wall_s": round(rollout_wall_s, 3),

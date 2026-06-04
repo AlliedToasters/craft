@@ -37,6 +37,11 @@ def stub_agent_substrate(monkeypatch):
     # The 3s startup sleep + any others — instant for tests.
     monkeypatch.setattr(agent.time, "sleep", lambda *_a, **_kw: None)
 
+    # These tests assume a live homunculus bridge; pin the issue-#9 liveness
+    # probe True so the early-abort guard never fires (it would otherwise hit a
+    # real connection-refused on the test box and bail before the death branch).
+    monkeypatch.setattr(agent, "_homunculus_reachable", lambda *_a, **_kw: True)
+
     # Initial-state fetches called once before the loop.
     monkeypatch.setattr(agent, "_fetch_stats", lambda: "hp=20 food=20")
     monkeypatch.setattr(agent, "_fetch_inventory", lambda: "(empty)")
