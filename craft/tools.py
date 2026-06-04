@@ -28,6 +28,7 @@ from craft.mine import (
     tunnel_for_logs,
     tunnel_for_stone,
 )
+from craft import mine as _mine  # for _mine.last_stop (cycle-stop detail, #11)
 
 from craft.config import HOMUNCULUS_HOST, HOMUNCULUS_PORT, HOMUNCULUS_BASE  # noqa: F401
 
@@ -1640,10 +1641,27 @@ def _handle_mine_delta(
     if after is None:
         after = before  # transport blip — best-effort report
     acquired = max(0, after - before)
+    # Issue #11: the homunculus MineHandler can stop the cycle with
+    # `no_effective_tool` (no correct pickaxe in inventory, or one broke
+    # mid-mine). _mine_first_reachable records it in _mine.last_stop. Only the
+    # baritone (non-fair) path consults it — the fair tunnel never touches
+    # last_stop, so a stale value from a prior call must not leak through.
+    stop = getattr(_mine, "last_stop", None)
+    tool_msg = (
+        stop.get("message", "")
+        if (not fair and result is None and isinstance(stop, dict)
+            and stop.get("reason") == "no_effective_tool")
+        else None
+    )
     if acquired > 0:
         # Got something. Distinguish full success (Baritone reached target)
         # from partial (cycle ended without target) so the agent knows whether
         # to call again for more or accept the partial.
+        if tool_msg is not None:
+            return (
+                f"PARTIAL then FAILED: acquired {acquired} of {delta} {label}-drops "
+                f"(now have {after}), then {tool_msg}"
+            )
         if result is None:
             return (
                 f"PARTIAL: acquired {acquired} of {delta} {label}-drops "
@@ -1652,6 +1670,8 @@ def _handle_mine_delta(
                 f"enough."
             )
         return f"acquired {acquired} more (now have {after} {label}-drops; last type mined: {result})"
+    if tool_msg is not None:
+        return f"FAILED {label}: {tool_msg}"
     if result is None:
         return f"FAILED: no candidate reachable for {label} (acquired 0)"
     return f"acquired 0 more (already had {after} {label}-drops — target was already met)"
@@ -1677,6 +1697,21 @@ def handle_mine_stone(args: dict) -> str:
     # is descend() first then 1×2 forward — which is exactly what fair=True
     # does. Other ores keep the toggle / get force-xray since their rare,
     # hidden drops genuinely benefit from baritone's chunk-scan.
+    # Tier-gate (issue #11): stone requires a wooden+ pickaxe to drop cobble.
+    # Mined barehanded (or with a shovel/axe), the block breaks for nothing and
+    # the whole turn is wasted — the footgun seen even on the agent0 diamond
+    # tape. mine_stone routes through the fair tunnel (excavate), so unlike
+    # mine_iron/diamond it can't lean on the homunculus MineHandler tool-check;
+    # gate it here at the tool boundary instead. (The tech tree always yields a
+    # wooden pickaxe before useful stone mining, so this never blocks legit play.)
+    gate = _mine_tier_gate(
+        "mine_stone", _PICKAXES_WOOD_PLUS,
+        "stone needs a WOODEN (or better) pickaxe to drop cobblestone — mining "
+        "it barehanded just breaks the block for nothing. Craft a wooden_pickaxe "
+        "first (mine_wood → craft planks → sticks → wooden_pickaxe), then mine_stone.",
+    )
+    if gate is not None:
+        return gate
     args = {**args, "fair": True}
     return _handle_mine_delta("mine_stone", args, STONE_DROPS, mine_any_stone,
                               fair_miner=tunnel_for_stone)
@@ -1689,6 +1724,11 @@ def handle_mine_stone(args: dict) -> str:
 # tier — every call doomed. M1-iron milestone gate is inert, so steer at the tool
 # boundary: refuse + redirect to the prerequisite instead of dispatching a doomed
 # mine. env CRAFT_MINE_TIER_GATE (default on; 0/false/no disables for A/B).
+_PICKAXES_WOOD_PLUS = frozenset({
+    "minecraft:wooden_pickaxe", "minecraft:golden_pickaxe",
+    "minecraft:stone_pickaxe", "minecraft:iron_pickaxe",
+    "minecraft:diamond_pickaxe", "minecraft:netherite_pickaxe",
+})
 _PICKAXES_STONE_PLUS = frozenset({
     "minecraft:stone_pickaxe", "minecraft:iron_pickaxe",
     "minecraft:diamond_pickaxe", "minecraft:netherite_pickaxe",

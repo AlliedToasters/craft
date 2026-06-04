@@ -80,6 +80,33 @@ def test_diamond_proceeds_with_netherite_pickaxe():
     assert dispatched
 
 
+def test_stone_blocked_without_any_pickaxe():
+    # Issue #11: barehanded stone breaks for nothing — gate it before dispatch.
+    result, dispatched = _run(tools.handle_mine_stone, {})
+    assert result.startswith("SKIPPED mine_stone")
+    assert "WOODEN" in result
+    assert not dispatched
+
+
+def test_stone_proceeds_with_wooden_pickaxe():
+    result, dispatched = _run(tools.handle_mine_stone, {"minecraft:wooden_pickaxe": 1})
+    assert dispatched
+    assert not result.startswith("SKIPPED")
+
+
+def test_stone_proceeds_with_iron_pickaxe():
+    # Any pickaxe >= wood satisfies stone.
+    result, dispatched = _run(tools.handle_mine_stone, {"minecraft:iron_pickaxe": 1})
+    assert dispatched
+
+
+def test_stone_blocked_with_only_a_shovel():
+    # A non-pickaxe tool is no better than barehanded for stone drops.
+    result, dispatched = _run(tools.handle_mine_stone, {"minecraft:iron_shovel": 1})
+    assert result.startswith("SKIPPED mine_stone")
+    assert not dispatched
+
+
 def test_env_kill_switch_disables_gate():
     # No pickaxe at all, but the gate is off → proceed (legacy behavior).
     result, dispatched = _run(tools.handle_mine_diamond, {}, env={"CRAFT_MINE_TIER_GATE": "0"})

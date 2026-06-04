@@ -74,6 +74,14 @@ COAL_TYPES = [
 SKIP_REASONS = {"unreachable", "never_started", "no_progress"}
 SUCCESS_REASONS = {"have_target", "already_satisfied"}
 
+# Detail of the most recent _mine_first_reachable cycle-stop (a non-skip,
+# non-success reason that halted the candidate cycle). Lets the tool-layer
+# handler surface specific guidance — e.g. homunculus's `no_effective_tool`
+# (issue #11, pickaxe missing/broke mid-mine) → "craft a pickaxe" — instead of
+# a generic "no candidate reachable". Process-local: fleet agents run as
+# separate processes, so there's no cross-agent race on this module global.
+last_stop: dict | None = None
+
 # Total wall-clock budget per candidate. Homunculus splits this into a short
 # start window (~15s) and the remainder for the actual mine; default 45s
 # matches the old chat-scrape budget of 15s start + 30s mining extension.
@@ -138,7 +146,11 @@ def _mine_first_reachable(
     `quantity` is the cumulative inventory target (matches Baritone's
     `mine(int, ...)` semantics). Returns the block id that produced a
     success reason, or None if every candidate was unreachable / refused.
+    On a None return caused by a hard stop (not just "nothing here"), the
+    stop reason+message is recorded in the module-level `last_stop`.
     """
+    global last_stop
+    last_stop = None
     matches = _scan_nearest(candidates, probe_radius, probe_y_radius)
     if matches is not None:
         ranked: list[tuple[str, float]] = []
@@ -167,6 +179,7 @@ def _mine_first_reachable(
         try:
             data = _mine_one(block, quantity)
         except requests.RequestException as e:
+            last_stop = {"reason": "transport_error", "message": str(e)}
             print(f"  → transport_error: {e}, stopping cycle")
             return None
         reason = data.get("reason", "unknown")
@@ -176,8 +189,11 @@ def _mine_first_reachable(
         if reason in SKIP_REASONS:
             print(f"  → {reason}, trying next")
             continue
-        # interrupted / timeout / busy / baritone_not_loaded / unknown_block / internal_error
+        # interrupted / timeout / busy / baritone_not_loaded / unknown_block /
+        # no_effective_tool / internal_error — a hard stop. Record it so the
+        # tool-layer can surface specific guidance (#11 no_effective_tool).
         msg = data.get("message", "")
+        last_stop = {"reason": reason, "message": msg}
         print(f"  → {reason} ({msg}), stopping cycle")
         return None
     return None
