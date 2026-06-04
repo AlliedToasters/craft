@@ -29,6 +29,16 @@ LOG_TYPES = [
     "pale_oak_log",
     "crimson_stem",
     "warped_stem",
+    # Bamboo (issue #4) is deliberately NOT a candidate here. The cane is a
+    # valid wood input on paper (9 bamboo→1 bamboo_block→2 bamboo_planks, the
+    # #planks tag — the craft layer handles it; see tools._resolve_wood_substitute)
+    # BUT Baritone cannot HARVEST it: /baritone/mine bamboo deactivates with 0
+    # collected, and /excavate breaks the cane without picking up drops
+    # (confirmed live 2026-06-04 on agent0/agent1). Adding bamboo here would be a
+    # regression: when bamboo is the nearest candidate the cycle would select it,
+    # hit a hard-stop "interrupted", and never fall through to the bamboo_jungle's
+    # sparse oak/jungle logs (which Baritone mines fine). Re-add only once a
+    # working bamboo harvest substrate exists. See the issue-#4 writeup.
 ]
 
 # Candidates whose drops feed stone-tier crafting. stone→cobblestone and
@@ -236,6 +246,71 @@ def mine_any_salvage_wood(quantity: int = 1) -> str | None:
     return _mine_first_reachable(
         quantity, SALVAGE_WOOD_TYPES, probe_radius=64, probe_y_radius=32
     )
+
+
+# Bamboo harvest (issue #4). Baritone cannot mine bamboo (#4653: MineProcess
+# stalls on the eye-level column segments) nor excavate/path dense bamboo, so
+# bamboo is NOT a /baritone/mine candidate (see LOG_TYPES). Instead we route
+# through homunculus's /harvest_bamboo: it breaks each column's ground-level
+# BASE (no #4653, and the base-break drops the whole column) and the stationary
+# player vacuums the drops. BAMBOO_DROPS is the delta-count set, kept separate
+# from LOG_DROPS so the bamboo-jungle fallback counts its own gain (mirrors the
+# salvage path).
+BAMBOO_DROPS = {"minecraft:bamboo"}
+
+
+def _reposition_to_bamboo() -> bool:
+    """Best-effort short hop toward the nearest bamboo so more bases come into
+    reach for the next harvest round. Tolerant of Baritone's dense-bamboo
+    pathing failures — returns False (caller stops) rather than raising."""
+    matches = _scan_nearest(["bamboo"], 12, 12)
+    if not matches:
+        return False
+    m = matches.get("minecraft:bamboo")
+    if not m:
+        return False
+    try:
+        # Target the base cell itself: it's occupied by bamboo, so Baritone
+        # stops on the adjacent walkable cell — which puts the player within
+        # break reach of the base (a +1 offset often lands just outside reach).
+        r = requests.post(
+            f"{HOMUNCULUS_BASE}/baritone/goto",
+            json={"x": int(m["x"]), "y": int(m["y"]),
+                  "z": int(m["z"]), "timeout_seconds": 12},
+            timeout=20,
+        )
+        return bool(r.json().get("success"))
+    except (requests.RequestException, ValueError, KeyError):
+        return False
+
+
+def harvest_bamboo(quantity: int = 1, *, max_rounds: int = 6) -> str | None:
+    """Harvest bamboo via the direct base-break primitive (/harvest_bamboo).
+
+    Baritone can't mine bamboo (#4653), so this bypasses it: each round breaks
+    the bamboo columns within reach, then hops toward more, until nothing is
+    reachable or `max_rounds`. `quantity` is advisory — a round harvests
+    whatever is in reach; the delta wrapper in tools.py counts the actual cane
+    gained. Returns "bamboo" if any column was broken this call, else None.
+    """
+    got = False
+    for _ in range(max_rounds):
+        try:
+            data = requests.post(
+                f"{HOMUNCULUS_BASE}/harvest_bamboo",
+                json={"radius": 5}, timeout=40,
+            ).json()
+        except (requests.RequestException, ValueError):
+            break
+        if data.get("success") and int(data.get("columns_broken", 0) or 0) > 0:
+            got = True
+            print(f"  [harvest_bamboo] broke {data.get('columns_broken')} columns "
+                  f"({data.get('bases_in_reach')} in reach)", flush=True)
+        # Whether or not this round harvested, try to reach more bamboo; stop on
+        # the first unreachable hop (dense-bamboo pathing is unreliable).
+        if not _reposition_to_bamboo():
+            break
+    return "bamboo" if got else None
 
 
 def mine_any_stone(quantity: int = 1) -> str | None:

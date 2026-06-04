@@ -173,13 +173,23 @@ class TestJunkDropped:
         "minecraft:amethyst_shard", "minecraft:saddle", "minecraft:name_tag",
         # Spawn eggs
         "minecraft:cow_spawn_egg", "minecraft:zombie_spawn_egg",
-        # Bamboo (deferred — biome filter handles spawn)
-        "minecraft:bamboo", "minecraft:bamboo_block", "minecraft:bamboo_planks",
     ])
     @pytest.mark.parametrize("tier", _TIERS)
     def test_junk_dropped(self, item, tier):
         assert item in drop_list_for_tier(tier), (
             f"junk item {item} not dropped at tier={tier}"
+        )
+
+    @pytest.mark.parametrize("item", [
+        # Bamboo wood forms — kept since issue #4 (un-deferred): the craft layer
+        # uses bamboo→block→planks as a supplementary wood source, so AutoDrop
+        # must NOT throw a bamboo haul away mid-tech-tree.
+        "minecraft:bamboo", "minecraft:bamboo_block", "minecraft:bamboo_planks",
+    ])
+    @pytest.mark.parametrize("tier", _TIERS)
+    def test_bamboo_kept(self, item, tier):
+        assert item not in drop_list_for_tier(tier), (
+            f"bamboo wood {item} should be kept at tier={tier} (issue #4)"
         )
 
 

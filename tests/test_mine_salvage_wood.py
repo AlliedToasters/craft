@@ -87,6 +87,9 @@ def test_no_logs_then_salvage_succeeds():
         seen.append(drops)
         if drops == tools.LOG_DROPS:
             return "FAILED: no candidate reachable for mine_wood (acquired 0)"
+        if drops == tools.BAMBOO_DROPS:
+            # bamboo is tried before salvage (issue #4); no bamboo here → fall through
+            return "FAILED: no candidate reachable for mine_wood (acquired 0)"
         if drops == tools.SALVAGE_WOOD_DROPS:
             return ("acquired 3 more (now have 3 mine_wood-drops; "
                     "last type mined: oak_planks)")

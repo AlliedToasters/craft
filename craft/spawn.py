@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import math
 import random as _random
+import re
 import time
 from typing import Callable, Optional
 
@@ -83,8 +84,15 @@ BAD_BIOMES: tuple[str, ...] = (
     # Frozen / no-tree spawn traps (kept even after tag-aware crafting).
     "ice_spikes", "frozen_river", "frozen_peaks",
     "windswept_hills", "windswept_gravelly_hills", "windswept_forest",
-    # Bamboo jungle: mine_wood fails (bamboo ≠ log; crafting support deferred).
-    "bamboo_jungle", "sparse_bamboo_jungle",
+    # Bamboo jungle: still banned (issue #4, 2026-06-04). The wood-tech blocker
+    # is NOT the craft layer (bamboo→block→planks substitution works, AutoDrop
+    # now keeps bamboo) but the SUBSTRATE: Baritone can't harvest bamboo cane
+    # (/mine deactivates, /excavate doesn't collect), AND vanilla deadlocks a
+    # pure-bamboo bootstrap (bamboo_block is a 3×3 recipe → needs a crafting
+    # table, but the table needs planks ← bamboo_block). Real play bootstraps
+    # off the jungle's sparse oak/jungle trees. Unban once a bamboo-harvest
+    # primitive lands. (`sparse_bamboo_jungle` dropped — not a real 1.21.4 id.)
+    "bamboo_jungle",
     # Stony shore: technically habitable but trees are out of scan radius;
     # 2026-05-16 concurrent rollout agent2 stuck T50 with 45/50 FAILED
     # mine_wood. Until salvage-from-structures (issue #7) lands, treat as
@@ -187,6 +195,54 @@ def _surface_from_column(blocks: list[dict]) -> tuple[Optional[int], Optional[st
     return best_y, best_id
 
 
+# "The nearest minecraft:bamboo_jungle is at [-736, 64, -1408] (1588 blocks away)"
+# The Y field is often "~" (unknown) for biome locates, so it's matched loosely.
+_LOCATE_RE = re.compile(
+    r"nearest\s+(\S+)\s+is at\s+\[\s*(-?\d+),\s*(-?\d+|~),\s*(-?\d+)\s*\]"
+)
+
+
+def locate_biome(
+    biome_id: str,
+    *,
+    server_cmd_base: str,
+    settle_s: float = 1.2,
+    log_lines: int = 40,
+) -> Optional[tuple[int, int]]:
+    """Find the nearest instance of `biome_id` via the server `/locate biome`.
+
+    Issues the command through the relay, then parses the captured console log
+    (GET /log) for the "nearest <id> is at [x, ~, z]" line. Returns (x, z) of
+    the located biome, or None when there's no parseable result (biome absent,
+    relay/log unavailable). The world seed is fixed, so a hit is deterministic
+    across runs — callers can treat the coordinate as a stable anchor, the same
+    way the burrow/doorway tests use a fixed arena coord.
+
+    `biome_id` may be bare ("bamboo_jungle") or namespaced; it's normalised to
+    minecraft:<id> for the command and matched namespace-insensitively.
+    """
+    short = biome_id.split(":")[-1]
+    namespaced = f"minecraft:{short}"
+    resp = _server_cmd(server_cmd_base, f"locate biome {namespaced}")
+    if resp.get("ok") is False:
+        return None
+    time.sleep(settle_s)
+    try:
+        r = requests.get(
+            f"{server_cmd_base}/log", params={"n": log_lines}, timeout=10
+        )
+        r.raise_for_status()
+        lines = r.json().get("lines", [])
+    except (requests.RequestException, ValueError):
+        return None
+    found: Optional[tuple[int, int]] = None
+    for line in lines:  # take the LAST matching line (most recent locate)
+        m = _LOCATE_RE.search(line)
+        if m and m.group(1).split(":")[-1] == short:
+            found = (int(m.group(2)), int(m.group(4)))  # (x, z); y may be "~"
+    return found
+
+
 def random_spawn(
     *,
     range_blocks: int,
@@ -196,6 +252,7 @@ def random_spawn(
     probe_y: int = SPECTATOR_PROBE_Y,
     max_retries: int = 12,
     bad_biomes: tuple[str, ...] = BAD_BIOMES,
+    require_biomes: Optional[frozenset[str]] = None,
     gen_timeout_s: float = 20.0,
     gen_poll_interval_s: float = 0.5,
     settle_timeout_s: float = 3.0,
@@ -307,9 +364,17 @@ def random_spawn(
             if s.get("on_ground") and (p is None or abs(p - spawn_y) <= 2):
                 break
 
-        # 6. Biome gate.
+        # 6. Biome gate. `require_biomes` is an explicit allow-list that
+        #    SUPERSEDES bad_biomes — an intentionally-targeted biome is never
+        #    "bad" (used to force-spawn into a specific biome, e.g. the bamboo
+        #    tech-tree e2e test). Without it, the usual ban-list applies.
         biome = (s.get("biome") or "").split(":")[-1]
-        if biome in bad_biomes:
+        if require_biomes is not None:
+            if biome not in require_biomes:
+                set_gamemode("spectator", player_name=player_name,
+                             server_cmd_base=server_cmd_base)
+                return False, f"biome_not_required_{biome}", surf_y
+        elif biome in bad_biomes:
             set_gamemode("spectator", player_name=player_name,
                          server_cmd_base=server_cmd_base)
             return False, f"biome_{biome}", surf_y

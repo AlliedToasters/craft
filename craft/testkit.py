@@ -31,6 +31,7 @@ from typing import Optional
 import requests
 
 from craft.spawn import random_spawn as _random_spawn
+from craft.spawn import locate_biome  # noqa: F401  (re-exported for tests)
 # Re-exported so tests can `from craft.testkit import set_difficulty, ...`
 # without needing to know that world.py is the home for these.
 from craft.world import (
@@ -49,7 +50,7 @@ from craft.config import HOMUNCULUS_BASE, SERVER_CMD_BASE, PLAYER_NAME  # noqa: 
 __all__ = [
     "HOMUNCULUS_BASE", "SERVER_CMD_BASE", "PLAYER_NAME",
     "cmd", "pos", "stats", "inventory",
-    "preflight", "setup_clean", "build_arena", "random_spawn",
+    "preflight", "setup_clean", "build_arena", "random_spawn", "locate_biome",
     "TestLogger",
     # re-exports from craft.world
     "set_difficulty", "set_gamemode", "set_time",
@@ -231,15 +232,24 @@ def random_spawn(
     homunculus_base: str = HOMUNCULUS_BASE,
     server_cmd_base: str = SERVER_CMD_BASE,
     player_name: str = PLAYER_NAME,
+    anchor_xz: Optional[tuple[int, int]] = None,
+    require_biomes: Optional[frozenset[str]] = None,
     rng=None,
     verbose: bool = True,
 ) -> dict:
-    """Thin wrapper around `craft.spawn.random_spawn` with testkit defaults."""
+    """Thin wrapper around `craft.spawn.random_spawn` with testkit defaults.
+
+    `anchor_xz` pins the offset origin (default: player's current x,z);
+    `require_biomes` is an allow-list that supersedes BAD_BIOMES — used to
+    force-spawn into a specific biome (e.g. the bamboo tech-tree e2e test).
+    """
     return _random_spawn(
         range_blocks=range_blocks,
         homunculus_base=homunculus_base,
         server_cmd_base=server_cmd_base,
         player_name=player_name,
+        anchor_xz=anchor_xz,
+        require_biomes=require_biomes,
         rng=rng,
         verbose=verbose,
     )

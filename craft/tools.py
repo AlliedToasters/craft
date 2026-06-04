@@ -14,6 +14,7 @@ import os
 import requests
 
 from craft.mine import (
+    BAMBOO_DROPS,
     LOG_TYPES,
     SALVAGE_WOOD_TYPES,
     _DIR_VEC,
@@ -21,6 +22,7 @@ from craft.mine import (
     mine_any_coal,
     mine_any_diamond,
     mine_any_iron,
+    harvest_bamboo,
     mine_any_log,
     mine_any_salvage_wood,
     mine_any_stone,
@@ -120,6 +122,16 @@ CRAFTING_RECIPES = {
     "minecraft:mangrove_planks": [("minecraft:mangrove_log", 1)],
     "minecraft:cherry_planks": [("minecraft:cherry_log", 1)],
     "minecraft:pale_oak_planks": [("minecraft:pale_oak_log", 1)],
+    # Bamboo (issue #4): the odd two-step wood path — 9 bamboo → 1 bamboo_block,
+    # 1 bamboo_block → 2 bamboo_planks. Counts follow the table's existing
+    # yield-ignoring convention (oak_planks lists [(oak_log, 1)] though 1 log
+    # makes 4 planks): only membership matters to _craft_recursive's reactive
+    # recursion, and the only other reader (_recipe_needs → _throwaway_policy)
+    # cares solely about throwaway blocks, none of which are bamboo. The cane
+    # `minecraft:bamboo` is a mined leaf (no recipe), so the chain bottoms out
+    # there with a "must be acquired (mining)" message if bamboo runs short.
+    "minecraft:bamboo_planks": [("minecraft:bamboo_block", 1)],
+    "minecraft:bamboo_block": [("minecraft:bamboo", 9)],
     "minecraft:stick": [("minecraft:oak_planks", 2)],
     "minecraft:crafting_table": [("minecraft:oak_planks", 4)],
 }
@@ -142,6 +154,43 @@ _PLANKS_LOG_BY_SPECIES = {
     "minecraft:cherry_planks": "minecraft:cherry_log",
     "minecraft:pale_oak_planks": "minecraft:pale_oak_log",
 }
+
+# Bamboo (issue #4) is the one wood species with no *_log, so it can't live in
+# _PLANKS_LOG_BY_SPECIES (a planks↔single-log, ×4-yield table). Its planks come
+# via a two-step craft: 9 `bamboo` → 1 `bamboo_block` → 2 `bamboo_planks`.
+# Modelled separately in _planks_available below.
+_BAMBOO = "minecraft:bamboo"
+_BAMBOO_BLOCK = "minecraft:bamboo_block"
+_BAMBOO_PLANKS = "minecraft:bamboo_planks"
+
+# Every *_planks species we'll substitute among. Standard 9 first so the
+# insertion-order tiebreak (pinned in tests/test_wood_substitution.py) is
+# unchanged; bamboo is appended as the bamboo_jungle fallback.
+_SUBSTITUTE_PLANKS: list[str] = list(_PLANKS_LOG_BY_SPECIES.keys()) + [_BAMBOO_PLANKS]
+
+# Inventory ids that contribute to any species' planks-availability count.
+_WOOD_SUBSTITUTE_ITEMS = (
+    set(_PLANKS_LOG_BY_SPECIES.keys())
+    | set(_PLANKS_LOG_BY_SPECIES.values())
+    | {_BAMBOO_PLANKS, _BAMBOO_BLOCK, _BAMBOO}
+)
+
+
+def _planks_available(planks_id: str, counts: dict[str, int]) -> int:
+    """How many planks of `planks_id` the held `counts` could produce.
+
+    Standard species: own planks + 4× own logs. Bamboo: own planks + 2× blocks
+    + 2×⌊bamboo/9⌋ (9 bamboo → 1 block → 2 planks). The bamboo floor-division
+    is why bamboo needs its own branch instead of the linear log table.
+    """
+    if planks_id == _BAMBOO_PLANKS:
+        return (
+            counts.get(_BAMBOO_PLANKS, 0)
+            + 2 * counts.get(_BAMBOO_BLOCK, 0)
+            + 2 * (counts.get(_BAMBOO, 0) // 9)
+        )
+    log_id = _PLANKS_LOG_BY_SPECIES[planks_id]
+    return counts.get(planks_id, 0) + 4 * counts.get(log_id, 0)
 
 TOOLS = [
     {
@@ -1549,9 +1598,11 @@ def _resolve_wood_substitute(ing_id: str, count: int) -> str:
     Returns either `ing_id` unchanged (we already have enough material to
     produce that species) or an alternative planks id from a species the
     agent is actually holding. Vanilla recipes use the #planks tag so the
-    parent craft accepts any species' planks.
+    parent craft accepts any species' planks — including bamboo_planks
+    (issue #4); when bamboo is the substitute, _craft_recursive walks the
+    two-step bamboo→block→planks path on its own.
     """
-    if ing_id not in _PLANKS_LOG_BY_SPECIES:
+    if ing_id not in _SUBSTITUTE_PLANKS:
         return ing_id
     try:
         resp = requests.get(f"{HOMUNCULUS_BASE}/inventory", timeout=5.0)
@@ -1559,32 +1610,26 @@ def _resolve_wood_substitute(ing_id: str, count: int) -> str:
         inv = resp.json()
     except (requests.RequestException, ValueError):
         return ing_id
-    items_of_interest = (
-        set(_PLANKS_LOG_BY_SPECIES.keys()) | set(_PLANKS_LOG_BY_SPECIES.values())
-    )
     counts: dict[str, int] = {}
     for slot in inv.get("main", []):
         sid = slot.get("id")
-        if sid in items_of_interest:
+        if sid in _WOOD_SUBSTITUTE_ITEMS:
             counts[sid] = counts.get(sid, 0) + slot.get("count", 0)
     offhand = inv.get("offhand")
-    if offhand and offhand.get("id") in items_of_interest:
+    if offhand and offhand.get("id") in _WOOD_SUBSTITUTE_ITEMS:
         sid = offhand["id"]
         counts[sid] = counts.get(sid, 0) + offhand.get("count", 0)
 
-    def available(planks_id: str, log_id: str) -> int:
-        return counts.get(planks_id, 0) + 4 * counts.get(log_id, 0)
-
-    log_id = _PLANKS_LOG_BY_SPECIES[ing_id]
-    if available(ing_id, log_id) >= count:
+    if _planks_available(ing_id, counts) >= count:
         return ing_id
-    for alt_planks, alt_log in _PLANKS_LOG_BY_SPECIES.items():
+    for alt_planks in _SUBSTITUTE_PLANKS:
         if alt_planks == ing_id:
             continue
-        if available(alt_planks, alt_log) >= count:
+        avail = _planks_available(alt_planks, counts)
+        if avail >= count:
             print(
                 f"  [craft] substituting {alt_planks} for {ing_id} "
-                f"(need {count}, have {counts.get(alt_log, 0)} {alt_log.split(':')[-1]})",
+                f"(need {count}, have {avail} planks-worth)",
                 flush=True,
             )
             return alt_planks
@@ -1692,6 +1737,23 @@ def handle_mine_wood(args: dict) -> str:
     args = {**args, "fair": False}
     out = _handle_mine_delta("mine_wood", args, LOG_DROPS, mine_any_log,
                              fair_miner=tunnel_for_logs)
+    # Bamboo fallback (issue #4): a bamboo_jungle thins trees out heavily, so a
+    # spawn may have no log in scan range — but bamboo cane everywhere. Baritone
+    # can't mine bamboo (#4653), so harvest_bamboo routes through the direct
+    # base-break primitive instead. Tried ONLY on a clean "no logs" miss (logs
+    # remain the primary + the table-bootstrap source — bamboo_block is a 3×3
+    # recipe needing a table, which the sparse trees provide). Self-contained
+    # delta on BAMBOO_DROPS, so it can't double-count a log haul.
+    if out.startswith("FAILED: no candidate reachable"):
+        bamboo = _handle_mine_delta("mine_wood", args, BAMBOO_DROPS, harvest_bamboo)
+        if not bamboo.startswith("FAILED") and not bamboo.startswith("acquired 0 more"):
+            return (
+                "[wood_source=bamboo] " + bamboo
+                + " — harvested bamboo cane (no logs in range). Bamboo crafts "
+                "9→bamboo_block→2 bamboo_planks, but bamboo_block needs a "
+                "crafting_table; make your first table from a log if you have "
+                "one."
+            )
     # Salvage fallback (issue #7): a wood-deficient spawn (deep cave, mineshaft,
     # snowy peak) has no logs in scan range, but structures hold worked wood.
     # Only planks salvage — they ARE planks, bypassing the log→plank craft step.

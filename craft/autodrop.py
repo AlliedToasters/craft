@@ -185,7 +185,10 @@ _LOGS_AND_STEMS: frozenset[str] = frozenset({
     "minecraft:dark_oak_log", "minecraft:jungle_log", "minecraft:acacia_log",
     "minecraft:cherry_log", "minecraft:mangrove_log", "minecraft:pale_oak_log",
     "minecraft:crimson_stem", "minecraft:warped_stem",
-    # bamboo_block OMITTED — bamboo progression deferred (biome spawn-filtered).
+    # Bamboo (issue #4): the cane is the bamboo_jungle wood input, bamboo_block
+    # the compressed step toward bamboo_planks. Kept so AutoDrop doesn't throw
+    # away a bamboo agent's only wood mid-tech-tree.
+    "minecraft:bamboo", "minecraft:bamboo_block",
 })
 
 _PLANKS: frozenset[str] = frozenset({
@@ -193,7 +196,7 @@ _PLANKS: frozenset[str] = frozenset({
     "minecraft:dark_oak_planks", "minecraft:jungle_planks", "minecraft:acacia_planks",
     "minecraft:cherry_planks", "minecraft:mangrove_planks", "minecraft:pale_oak_planks",
     "minecraft:crimson_planks", "minecraft:warped_planks",
-    # bamboo_planks OMITTED — see above.
+    "minecraft:bamboo_planks",  # issue #4 — bamboo wood tech tree
 })
 
 ALWAYS_KEEP: frozenset[str] = (
